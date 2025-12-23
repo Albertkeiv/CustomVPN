@@ -24,6 +24,8 @@ const (
 	routeOpTimeout         = 5 * time.Second
 	processStopTimeout     = 5 * time.Second
 	connectionCheckTimeout = 5 * time.Second
+	tunnelDetectTimeout    = 10 * time.Second
+	tunnelDetectDelay      = 500 * time.Millisecond
 )
 
 func (a *Application) startPreflight(_ *state.AppContext) {
@@ -381,13 +383,11 @@ func (a *Application) executeConnecting(ctx *state.AppContext, artifacts *connec
 	if a.routes == nil {
 		return newScenarioError(state.ErrorKindRoutingFailed, "Маршрутизатор не инициализирован", fmt.Errorf("route manager is nil"))
 	}
-	if ctx.DefaultGateway == nil || strings.TrimSpace(ctx.DefaultGateway.IP) == "" {
-		gateway, err := routes.DetectDefaultGateway()
-		if err != nil {
-			return newScenarioError(state.ErrorKindRoutingFailed, prepareGatewayErrorMessage(err), err)
-		}
-		ctx.DefaultGateway = gateway
+	gateway, err := routes.DetectDefaultGateway()
+	if err != nil {
+		return newScenarioError(state.ErrorKindRoutingFailed, prepareGatewayErrorMessage(err), err)
 	}
+	ctx.DefaultGateway = gateway
 	server := ctx.FindServer(ctx.SelectedServerID)
 	if server == nil {
 		return newScenarioError(state.ErrorKindConfigFailed, "Не удалось найти выбранный сервер", fmt.Errorf("server %s not found", ctx.SelectedServerID))
@@ -405,11 +405,7 @@ func (a *Application) executeConnecting(ctx *state.AppContext, artifacts *connec
 	if err := a.addProfileRoutes(ctx, profile.DirectRoutes, state.RouteKindDirect, ctx.DefaultGateway, artifacts); err != nil {
 		return err
 	}
-	tunnelGateway, err := tunnelGatewayInfo()
-	if err != nil {
-		return newScenarioError(state.ErrorKindRoutingFailed, "Не удалось определить интерфейс туннеля", err)
-	}
-	if err := a.addProfileRoutes(ctx, profile.TunnelRoutes, state.RouteKindTunnel, tunnelGateway, artifacts); err != nil {
+	if err := a.applyKillSwitch(ctx, artifacts); err != nil {
 		return err
 	}
 	configPath, err := a.writeCoreConfig(server)
@@ -424,11 +420,24 @@ func (a *Application) executeConnecting(ctx *state.AppContext, artifacts *connec
 		return newScenarioError(state.ErrorKindProcessFailed, "Не удалось запустить Core", err)
 	}
 	artifacts.coreStarted = true
+	tunnelGateway, err := a.waitForTunnelGateway(tunnelDetectTimeout)
+	if err != nil {
+		return newScenarioError(state.ErrorKindRoutingFailed, "Не удалось определить интерфейс туннеля", err)
+	}
+	if err := a.applyTunnelDNS(ctx, tunnelGateway, artifacts); err != nil {
+		return err
+	}
+	if err := a.addProfileRoutes(ctx, profile.TunnelRoutes, state.RouteKindTunnel, tunnelGateway, artifacts); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (a *Application) executeDisconnecting(ctx *state.AppContext) error {
 	a.stopProcess(state.ProcessCore, processStopTimeout)
+	if ctx != nil {
+		a.removeKillSwitch(ctx, nil)
+	}
 	if a.routes == nil || ctx == nil {
 		return nil
 	}
@@ -525,12 +534,104 @@ func (a *Application) addProfileRoutes(ctx *state.AppContext, cidrs []string, ki
 	return nil
 }
 
+func (a *Application) applyTunnelDNS(ctx *state.AppContext, gateway *state.GatewayInfo, artifacts *connectArtifacts) *scenarioError {
+	if a.dns == nil {
+		return newScenarioError(state.ErrorKindRoutingFailed, "DNS менеджер не инициализирован", fmt.Errorf("dns manager is nil"))
+	}
+	if gateway == nil || strings.TrimSpace(gateway.InterfaceName) == "" {
+		return newScenarioError(state.ErrorKindRoutingFailed, "Не удалось определить интерфейс туннеля", fmt.Errorf("tunnel interface name is empty"))
+	}
+	dnsCtx, cancel := a.requestContext(routeOpTimeout)
+	defer cancel()
+	if err := a.dns.SetInterfaceDNS(dnsCtx, gateway.InterfaceName, []string{"100.64.127.2"}); err != nil {
+		return newScenarioError(state.ErrorKindRoutingFailed, "Не удалось настроить DNS туннеля", err)
+	}
+	if a.logger != nil {
+		a.logger.Infof("tunnel DNS set: interface=%s servers=%v", gateway.InterfaceName, []string{"100.64.127.2"})
+	}
+	return nil
+}
+
+func (a *Application) applyKillSwitch(ctx *state.AppContext, artifacts *connectArtifacts) *scenarioError {
+	if a.firewall == nil {
+		return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch не инициализирован", fmt.Errorf("firewall manager is nil"))
+	}
+	if ctx == nil || ctx.DefaultGateway == nil {
+		return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch не может определить основной интерфейс", fmt.Errorf("default gateway is nil"))
+	}
+	if strings.TrimSpace(ctx.DefaultGateway.InterfaceName) == "" {
+		return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch не может определить основной интерфейс", fmt.Errorf("default gateway interface name is empty"))
+	}
+	firewallCtx, cancel := a.requestContext(routeOpTimeout)
+	defer cancel()
+	rules, err := a.firewall.BlockDNSOnInterface(firewallCtx, ctx.DefaultGateway.InterfaceName)
+	if err != nil {
+		return newScenarioError(state.ErrorKindRoutingFailed, "Не удалось применить Kill Switch", err)
+	}
+	if a.logger != nil {
+		a.logger.Infof("kill switch enabled: interface=%s rules=%v", ctx.DefaultGateway.InterfaceName, rules)
+	}
+	ctx.KillSwitchRules = append([]string{}, rules...)
+	if artifacts != nil {
+		artifacts.killSwitchRules = append(artifacts.killSwitchRules, rules...)
+	}
+	return nil
+}
+
+func (a *Application) removeKillSwitch(ctx *state.AppContext, rules []string) {
+	if a.firewall == nil {
+		return
+	}
+	if len(rules) == 0 && ctx != nil {
+		rules = ctx.KillSwitchRules
+	}
+	if len(rules) == 0 {
+		return
+	}
+	firewallCtx, cancel := a.requestContext(routeOpTimeout)
+	defer cancel()
+	if err := a.firewall.RemoveRules(firewallCtx, rules); err != nil {
+		if a.logger != nil {
+			a.logger.Errorf("kill switch cleanup failed: %v", err)
+		}
+		return
+	}
+	if a.logger != nil {
+		a.logger.Infof("kill switch disabled: rules=%v", rules)
+	}
+	if ctx != nil {
+		ctx.KillSwitchRules = nil
+	}
+}
+
 func tunnelGatewayInfo() (*state.GatewayInfo, error) {
 	ip := net.ParseIP("100.64.127.1")
 	if ip == nil {
 		return nil, fmt.Errorf("invalid tunnel gateway ip")
 	}
 	return routes.DetectGatewayForIP(ip)
+}
+
+func (a *Application) waitForTunnelGateway(timeout time.Duration) (*state.GatewayInfo, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for attempt := 1; ; attempt++ {
+		if a.isStopping() {
+			return nil, fmt.Errorf("tunnel detection canceled")
+		}
+		gateway, err := tunnelGatewayInfo()
+		if err == nil {
+			if attempt > 1 && a.logger != nil {
+				a.logger.Infof("tunnel interface detected after %d attempts", attempt)
+			}
+			return gateway, nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return nil, lastErr
+		}
+		time.Sleep(tunnelDetectDelay)
+	}
 }
 
 func sanitizeFileName(name string, fallback string) string {
@@ -563,10 +664,11 @@ func newScenarioError(kind state.ErrorKind, message string, err error) *scenario
 }
 
 type connectArtifacts struct {
-	app         *Application
-	ctx         *state.AppContext
-	routes      []state.RouteRecord
-	coreStarted bool
+	app             *Application
+	ctx             *state.AppContext
+	routes          []state.RouteRecord
+	coreStarted     bool
+	killSwitchRules []string
 }
 
 func newConnectArtifacts(app *Application, ctx *state.AppContext) *connectArtifacts {
@@ -583,6 +685,9 @@ func (c *connectArtifacts) rollback() {
 	}
 	if c.coreStarted {
 		c.app.stopProcess(state.ProcessCore, processStopTimeout)
+	}
+	if len(c.killSwitchRules) > 0 {
+		c.app.removeKillSwitch(c.ctx, c.killSwitchRules)
 	}
 	for i := len(c.routes) - 1; i >= 0; i-- {
 		if err := c.app.removeRouteRecord(c.ctx, c.routes[i]); err != nil {

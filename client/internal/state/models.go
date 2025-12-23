@@ -44,6 +44,7 @@ type RouteProfile struct {
 type GatewayInfo struct {
 	IP             string
 	InterfaceIndex int
+	InterfaceName  string
 	Metric         int
 }
 
@@ -209,6 +210,7 @@ type AppContext struct {
 	SelectedServerID  string
 	SelectedProfileID string
 	DefaultGateway    *GatewayInfo
+	KillSwitchRules   []string
 	RoutesRegistry    RoutesRegistry
 	ProcessRegistry   ProcessRegistry
 	LastError         *ErrorInfo

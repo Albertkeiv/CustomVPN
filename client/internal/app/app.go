@@ -9,6 +9,8 @@ import (
 
 	"customvpn/client/internal/config"
 	"customvpn/client/internal/controlclient"
+	"customvpn/client/internal/dns"
+	"customvpn/client/internal/firewall"
 	"customvpn/client/internal/logging"
 	"customvpn/client/internal/process"
 	"customvpn/client/internal/routes"
@@ -24,6 +26,8 @@ type Application struct {
 	machine    *state.Machine
 	ctx        *state.AppContext
 	routes     *routes.Manager
+	firewall   *firewall.Manager
+	dns        *dns.Manager
 	launcher   *process.Launcher
 	controlIP4 net.IP
 	ui         *ui.Manager
@@ -53,6 +57,8 @@ func New(cfg *config.Config, logger *logging.Logger) (*Application, error) {
 		control:  client,
 		ctx:      stateCtx,
 		routes:   routes.NewManager(logger),
+		firewall: firewall.NewManager(logger),
+		dns:      dns.NewManager(logger),
 		launcher: process.NewLauncher(logger),
 		shutdown: make(chan struct{}),
 		runCtx:   runCtx,

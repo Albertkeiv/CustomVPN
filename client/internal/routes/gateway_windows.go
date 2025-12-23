@@ -47,6 +47,7 @@ func DetectDefaultGateway() (*state.GatewayInfo, error) {
 			info := &state.GatewayInfo{
 				IP:             ip,
 				InterfaceIndex: int(adapter.IfIndex),
+				InterfaceName:  windows.UTF16PtrToString(adapter.FriendlyName),
 				Metric:         int(adapter.Ipv4Metric),
 			}
 			if info.Metric <= 0 {
@@ -109,6 +110,7 @@ func DetectGatewayForIP(ip net.IP) (*state.GatewayInfo, error) {
 			info := &state.GatewayInfo{
 				IP:             ip.String(),
 				InterfaceIndex: int(adapter.IfIndex),
+				InterfaceName:  windows.UTF16PtrToString(adapter.FriendlyName),
 				Metric:         int(adapter.Ipv4Metric),
 			}
 			if info.Metric <= 0 {

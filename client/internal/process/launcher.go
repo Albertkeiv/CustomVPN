@@ -117,8 +117,10 @@ func (l *Launcher) Stop(name state.ProcessName, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	if err := h.cmd.Process.Signal(os.Interrupt); err != nil {
-		l.logger.Errorf("send interrupt to %s: %v", name, err)
+	if err := sendInterrupt(h.cmd); err != nil {
+		if l.logger != nil {
+			l.logger.Debugf("send interrupt to %s failed: %v", name, err)
+		}
 	}
 	select {
 	case <-h.exitCh:
