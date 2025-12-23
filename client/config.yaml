@@ -1,0 +1,6 @@
+# Базовая конфигурация клиента CustomVPN (MVP)
+# Значения можно переопределять в зависимости от окружения.
+control_server_url: "http://127.0.0.1:8080"
+core_path: "./bin/sing-box.exe"
+log_level: "info"
+log_file: "./logs/app.log"

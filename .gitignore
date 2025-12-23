@@ -1,0 +1,51 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Go workspace file
+go.work
+
+# Dependency directories (uncomment if using dep)
+# vendor/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Built binaries
+example-server/example-server.exe
+
+# Logs
+*.log
+logs/
+
+# Example server configs
+example-server/servers/*.json
+!example-server/servers/*.json.example
+example-server/routes/*.json
+!example-server/routes/*.json.example
+client/logs/*.log
+
+# bin
+client/bin/
+
+# Core_config
+client/core_config/
