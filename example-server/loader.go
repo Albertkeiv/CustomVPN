@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 )
 
-// LoadServers loads all server JSON files from the specified directory
-func LoadServers(dir string) ([]ServerDTO, error) {
-	var serverDTOs []ServerDTO
+// LoadProfiles loads all profile JSON files from the specified directory.
+func LoadProfiles(dir string) ([]ProfileDTO, error) {
+	var profileDTOs []ProfileDTO
 
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -26,16 +26,16 @@ func LoadServers(dir string) ([]ServerDTO, error) {
 		}
 		defer file.Close()
 
-		var dto ServerDTO
+		var dto ProfileDTO
 		if err := json.NewDecoder(file).Decode(&dto); err != nil {
 			return fmt.Errorf("failed to decode %s: %w", path, err)
 		}
 
-		if err := validateServerDTO(dto); err != nil {
-			return fmt.Errorf("invalid server DTO in %s: %w", path, err)
+		if err := validateProfileDTO(dto); err != nil {
+			return fmt.Errorf("invalid profile DTO in %s: %w", path, err)
 		}
 
-		serverDTOs = append(serverDTOs, dto)
+		profileDTOs = append(profileDTOs, dto)
 		return nil
 	})
 
@@ -43,49 +43,11 @@ func LoadServers(dir string) ([]ServerDTO, error) {
 		return nil, err
 	}
 
-	return serverDTOs, nil
+	return profileDTOs, nil
 }
 
-// LoadRoutes loads all route JSON files from the specified directory
-func LoadRoutes(dir string) ([]RouteProfileDTO, error) {
-	var routeDTOs []RouteProfileDTO
-
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || filepath.Ext(path) != ".json" {
-			return nil
-		}
-
-		file, err := os.Open(path)
-		if err != nil {
-			return fmt.Errorf("failed to open %s: %w", path, err)
-		}
-		defer file.Close()
-
-		var dto RouteProfileDTO
-		if err := json.NewDecoder(file).Decode(&dto); err != nil {
-			return fmt.Errorf("failed to decode %s: %w", path, err)
-		}
-
-		if err := validateRouteProfileDTO(dto); err != nil {
-			return fmt.Errorf("invalid route DTO in %s: %w", path, err)
-		}
-
-		routeDTOs = append(routeDTOs, dto)
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	return routeDTOs, nil
-}
-
-// validateServerDTO performs basic validation on ServerDTO
-func validateServerDTO(dto ServerDTO) error {
+// validateProfileDTO performs basic validation on ProfileDTO.
+func validateProfileDTO(dto ProfileDTO) error {
 	if dto.ID == "" {
 		return fmt.Errorf("id is required")
 	}
@@ -97,17 +59,6 @@ func validateServerDTO(dto ServerDTO) error {
 	}
 	if dto.Port <= 0 || dto.Port > 65535 {
 		return fmt.Errorf("invalid port: %d", dto.Port)
-	}
-	return nil
-}
-
-// validateRouteProfileDTO performs basic validation on RouteProfileDTO
-func validateRouteProfileDTO(dto RouteProfileDTO) error {
-	if dto.ID == "" {
-		return fmt.Errorf("id is required")
-	}
-	if dto.Name == "" {
-		return fmt.Errorf("name is required")
 	}
 	// Additional validation for CIDR can be added if needed
 	return nil

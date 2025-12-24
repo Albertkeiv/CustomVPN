@@ -14,8 +14,8 @@ import (
 func StartServer(config *ServerConfig) {
 	http.HandleFunc("/health", loggingMiddleware(healthHandler))
 	http.HandleFunc("/auth", loggingMiddleware(authHandler))
-	http.HandleFunc("/sync/servers", loggingMiddleware(authMiddleware(syncServersHandler)))
-	http.HandleFunc("/sync/routes", loggingMiddleware(authMiddleware(syncRoutesHandler)))
+	http.HandleFunc("/sync/profiles", loggingMiddleware(authMiddleware(syncProfilesListHandler)))
+	http.HandleFunc("/profiles/", loggingMiddleware(authMiddleware(syncProfileHandler)))
 
 	server := &http.Server{
 		Addr:    config.ListenAddr,

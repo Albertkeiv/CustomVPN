@@ -4,59 +4,67 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 )
 
-// syncServersHandler handles GET /sync/servers
-func syncServersHandler(w http.ResponseWriter, r *http.Request) {
+// syncProfilesListHandler handles GET /sync/profiles (list).
+func syncProfilesListHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var serverDTOs []ServerDTO
-	for _, server := range servers {
-		dto := ServerDTO{
-			ID:         server.ID,
-			Name:       server.Name,
-			Country:    server.Country,
-			Host:       server.Host,
-			Port:       server.Port,
-			CoreConfig: server.CoreConfig,
+	var profileDTOs []ProfileSummaryDTO
+	for _, profile := range profiles {
+		dto := ProfileSummaryDTO{
+			ID:      profile.ID,
+			Name:    profile.Name,
+			Country: profile.Country,
 		}
-		serverDTOs = append(serverDTOs, dto)
+		profileDTOs = append(profileDTOs, dto)
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(serverDTOs); err != nil {
-		log.Printf("Failed to encode servers: %v", err)
+	if err := json.NewEncoder(w).Encode(profileDTOs); err != nil {
+		log.Printf("Failed to encode profiles: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 }
 
-// syncRoutesHandler handles GET /sync/routes
-func syncRoutesHandler(w http.ResponseWriter, r *http.Request) {
+// syncProfileHandler handles GET /profiles/{id}.
+func syncProfileHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	var routeDTOs []RouteProfileDTO
-	for _, route := range routes {
-		dto := RouteProfileDTO{
-			ID:           route.ID,
-			Name:         route.Name,
-			DirectRoutes: route.DirectRoutes,
-			TunnelRoutes: route.TunnelRoutes,
-		}
-		routeDTOs = append(routeDTOs, dto)
+	id := strings.TrimPrefix(r.URL.Path, "/profiles/")
+	id = strings.TrimSpace(id)
+	if id == "" {
+		http.Error(w, "profile id is required", http.StatusBadRequest)
+		return
 	}
-
+	profile, ok := profiles[id]
+	if !ok {
+		http.Error(w, "profile not found", http.StatusNotFound)
+		return
+	}
+	dto := ProfileDTO{
+		ID:           profile.ID,
+		Name:         profile.Name,
+		Country:      profile.Country,
+		Host:         profile.Host,
+		Port:         profile.Port,
+		CoreConfig:   profile.CoreConfig,
+		DirectRoutes: profile.DirectRoutes,
+		TunnelRoutes: profile.TunnelRoutes,
+		KillSwitch:  profile.KillSwitch,
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(routeDTOs); err != nil {
-		log.Printf("Failed to encode routes: %v", err)
+	if err := json.NewEncoder(w).Encode(dto); err != nil {
+		log.Printf("Failed to encode profile: %v", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}

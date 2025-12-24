@@ -21,23 +21,18 @@ const (
 	ErrorKindUnknown            ErrorKind = "Unknown"
 )
 
-// Server описывает прокси-сервер, полученный от Control-сервера и используемый в приложении.
-type Server struct {
+// Profile описывает прокси-сервер, полученный от Control-сервера и используемый в приложении.
+type Profile struct {
 	ID                 string          `json:"id"`
 	Name               string          `json:"name"`
 	Country            string          `json:"country"`
 	Host               string          `json:"host"`
 	Port               int             `json:"port"`
 	CoreConfigRaw      json.RawMessage `json:"core_config"`
+	DirectRoutes       []string        `json:"direct_routes"`
+	TunnelRoutes       []string        `json:"tunnel_routes"`
+	KillSwitchEnabled  bool            `json:"kill_switch"`
 	CoreConfigFilePath string          `json:"-"`
-}
-
-// RouteProfile описывает профиль маршрутов Direct/Tunnel.
-type RouteProfile struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	DirectRoutes []string `json:"direct_routes"`
-	TunnelRoutes []string `json:"tunnel_routes"`
 }
 
 // GatewayInfo описывает маршрут по умолчанию Windows.
@@ -192,7 +187,6 @@ type UIState struct {
 	IsMainVisible       bool
 	IsConnecting        bool
 	IsConnected         bool
-	SelectedServerID    string
 	SelectedProfileID   string
 	StatusText          string
 	LoginInput          string
@@ -205,9 +199,7 @@ type UIState struct {
 type AppContext struct {
 	Config            *config.Config
 	AuthToken         string
-	ServersList       []Server
-	RoutesProfiles    []RouteProfile
-	SelectedServerID  string
+	Profiles          []Profile
 	SelectedProfileID string
 	DefaultGateway    *GatewayInfo
 	KillSwitchRules   []string
@@ -228,22 +220,12 @@ func NewAppContext(cfg *config.Config) *AppContext {
 	}
 }
 
-// FindServer возвращает ссылку на сервер по ID.
-func (ctx *AppContext) FindServer(id string) *Server {
-	for i := range ctx.ServersList {
-		if ctx.ServersList[i].ID == id {
-			return &ctx.ServersList[i]
+func (ctx *AppContext) FindProfile(id string) *Profile {
+	for i := range ctx.Profiles {
+		if ctx.Profiles[i].ID == id {
+			return &ctx.Profiles[i]
 		}
 	}
 	return nil
 }
 
-// FindRouteProfile возвращает ссылку на профиль маршрутов по ID.
-func (ctx *AppContext) FindRouteProfile(id string) *RouteProfile {
-	for i := range ctx.RoutesProfiles {
-		if ctx.RoutesProfiles[i].ID == id {
-			return &ctx.RoutesProfiles[i]
-		}
-	}
-	return nil
-}

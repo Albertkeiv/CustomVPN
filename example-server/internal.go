@@ -1,19 +1,14 @@
 package main
 
-// Server represents an internal server structure
-type Server struct {
-	ID         string
-	Name       string
-	Country    string
-	Host       string
-	Port       int
-	CoreConfig interface{}
-}
-
-// RouteProfile represents an internal route profile structure
-type RouteProfile struct {
+// Profile represents an internal profile structure.
+type Profile struct {
 	ID           string
 	Name         string
+	Country      string
+	Host         string
+	Port         int
+	CoreConfig   interface{}
 	DirectRoutes []string
 	TunnelRoutes []string
+	KillSwitch  bool
 }

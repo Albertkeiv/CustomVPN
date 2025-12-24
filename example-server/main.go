@@ -18,20 +18,14 @@ func main() {
 
 	log.Printf("Loaded config from %s", *configPath)
 
-	// Load servers
-	serverDTOs, err := LoadServers(config.ServersDir)
+	// Load profiles
+	profileDTOs, err := LoadProfiles(config.ProfilesDir)
 	if err != nil {
-		log.Fatalf("Failed to load servers: %v", err)
-	}
-
-	// Load routes
-	routeDTOs, err := LoadRoutes(config.RoutesDir)
-	if err != nil {
-		log.Fatalf("Failed to load routes: %v", err)
+		log.Fatalf("Failed to load profiles: %v", err)
 	}
 
 	// Initialize storage
-	InitStorage(config, serverDTOs, routeDTOs)
+	InitStorage(config, profileDTOs)
 
 	// Start server
 	StartServer(config)

@@ -117,10 +117,10 @@ func (c *Client) Auth(ctx context.Context, login, password string) (string, erro
 	return body.AuthToken, nil
 }
 
-// SyncServers вызывает /sync/servers.
-func (c *Client) SyncServers(ctx context.Context, authToken string) ([]state.Server, error) {
-	const op = "SyncServers"
-	resp, err := c.do(ctx, http.MethodGet, "/sync/servers", authToken, nil)
+// SyncProfileList вызывает /sync/profiles.
+func (c *Client) SyncProfileList(ctx context.Context, authToken string) ([]state.Profile, error) {
+	const op = "SyncProfileList"
+	resp, err := c.do(ctx, http.MethodGet, "/sync/profiles", authToken, nil)
 	if err != nil {
 		return nil, wrapError(op, state.ErrorKindNetworkUnavailable, err)
 	}
@@ -128,37 +128,11 @@ func (c *Client) SyncServers(ctx context.Context, authToken string) ([]state.Ser
 	if resp.StatusCode != http.StatusOK {
 		return nil, &Error{Op: op, Kind: state.ErrorKindSyncFailed, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %d", resp.StatusCode)}
 	}
-	var payload []ServerDTO
+	var payload []ProfileSummaryDTO
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, wrapError(op, state.ErrorKindSyncFailed, err)
 	}
-	servers := make([]state.Server, 0, len(payload))
-	for _, dto := range payload {
-		server, err := dto.Validate()
-		if err != nil {
-			return nil, wrapError(op, state.ErrorKindSyncFailed, err)
-		}
-		servers = append(servers, server)
-	}
-	return servers, nil
-}
-
-// SyncRoutes вызывает /sync/routes.
-func (c *Client) SyncRoutes(ctx context.Context, authToken string) ([]state.RouteProfile, error) {
-	const op = "SyncRoutes"
-	resp, err := c.do(ctx, http.MethodGet, "/sync/routes", authToken, nil)
-	if err != nil {
-		return nil, wrapError(op, state.ErrorKindNetworkUnavailable, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, &Error{Op: op, Kind: state.ErrorKindSyncFailed, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %d", resp.StatusCode)}
-	}
-	var payload []RouteProfileDTO
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, wrapError(op, state.ErrorKindSyncFailed, err)
-	}
-	profiles := make([]state.RouteProfile, 0, len(payload))
+	profiles := make([]state.Profile, 0, len(payload))
 	for _, dto := range payload {
 		profile, err := dto.Validate()
 		if err != nil {
@@ -167,6 +141,32 @@ func (c *Client) SyncRoutes(ctx context.Context, authToken string) ([]state.Rout
 		profiles = append(profiles, profile)
 	}
 	return profiles, nil
+}
+
+// SyncProfile вызывает /profiles/{id}.
+func (c *Client) SyncProfile(ctx context.Context, authToken string, id string) (state.Profile, error) {
+	const op = "SyncProfile"
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return state.Profile{}, wrapError(op, state.ErrorKindSyncFailed, errors.New("profile id is empty"))
+	}
+	resp, err := c.do(ctx, http.MethodGet, "/profiles/"+url.PathEscape(id), authToken, nil)
+	if err != nil {
+		return state.Profile{}, wrapError(op, state.ErrorKindNetworkUnavailable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return state.Profile{}, &Error{Op: op, Kind: state.ErrorKindSyncFailed, Status: resp.StatusCode, Err: fmt.Errorf("unexpected status %d", resp.StatusCode)}
+	}
+	var payload ProfileDTO
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return state.Profile{}, wrapError(op, state.ErrorKindSyncFailed, err)
+	}
+	profile, err := payload.Validate()
+	if err != nil {
+		return state.Profile{}, wrapError(op, state.ErrorKindSyncFailed, err)
+	}
+	return profile, nil
 }
 
 func (c *Client) do(ctx context.Context, method, path, authToken string, body io.Reader) (*http.Response, error) {

@@ -37,10 +37,10 @@ const (
 	EventUICredentialsChanged  EventType = "UI_CREDENTIALS_CHANGED"
 	EventUIClickLogin          EventType = "UI_CLICK_LOGIN"
 	EventUIClickRetryPreflight EventType = "UI_CLICK_RETRY_PREFLIGHT"
-	EventUISelectServer        EventType = "UI_SELECT_SERVER"
-	EventUISelectRoute         EventType = "UI_SELECT_ROUTE"
+	EventUISelectProfile       EventType = "UI_SELECT_PROFILE"
 	EventUIClickConnect        EventType = "UI_CLICK_CONNECT"
 	EventUIClickDisconnect     EventType = "UI_CLICK_DISCONNECT"
+	EventUIClickCleanup        EventType = "UI_CLICK_CLEANUP"
 	EventUIOpenSettings        EventType = "UI_OPEN_SETTINGS"
 	EventUICloseWindow         EventType = "UI_CLOSE_WINDOW"
 	EventUIShowWindow          EventType = "UI_SHOW_WINDOW"
@@ -65,6 +65,7 @@ const (
 	EventSysConnectingFailure EventType = "SYS_CONNECTING_FAILURE"
 	EventSysDisconnectingDone EventType = "SYS_DISCONNECTING_DONE"
 	EventSysProcessExited     EventType = "SYS_PROCESS_EXITED"
+	EventSysCleanupDone       EventType = "SYS_CLEANUP_DONE"
 	EventSysTimeout           EventType = "SYS_TIMEOUT"
 )
 
@@ -95,8 +96,7 @@ type AuthSuccessPayload struct {
 
 // SyncSuccessPayload содержит списки серверов и профилей.
 type SyncSuccessPayload struct {
-	Servers []Server
-	Routes  []RouteProfile
+	Profiles []Profile
 }
 
 // PrepareEnvSuccessPayload содержит найденный default gateway.
@@ -118,6 +118,11 @@ type ProcessExitPayload struct {
 	Reason   string
 }
 
+// CleanupResultPayload reports cleanup completion details.
+type CleanupResultPayload struct {
+	Errors []string
+}
+
 // TimeoutPayload описывает операцию, превысившую таймаут.
 type TimeoutPayload struct {
 	Operation string
@@ -131,6 +136,7 @@ type Callbacks struct {
 	StartPrepareEnv     func(ctx *AppContext)
 	StartConnecting     func(ctx *AppContext)
 	StartDisconnecting  func(ctx *AppContext)
+	ForceCleanup        func(ctx *AppContext)
 	CleanupAndExit      func(ctx *AppContext)
 	ShowLoginWindow     func(ctx *AppContext)
 	ShowMainWindow      func(ctx *AppContext)
@@ -138,6 +144,8 @@ type Callbacks struct {
 	UpdateUI            func(ctx *AppContext)
 	ShowModalError      func(info *ErrorInfo)
 	ShowTransientNotice func(message string)
+	ShowCleanupStarted  func()
+	ShowCleanupDone     func(hasErrors bool)
 }
 
 // Machine инкапсулирует event-loop и текущее состояние приложения.
@@ -272,6 +280,15 @@ func (m *Machine) handleEvent(evt Event) {
 	if evt.TS.IsZero() {
 		evt.TS = time.Now()
 	}
+	if evt.Type == EventUIClickCleanup {
+		if m.callbacks.ShowCleanupStarted != nil {
+			m.callbacks.ShowCleanupStarted()
+		} else {
+			m.showTransient("Очистка запущена")
+		}
+		m.invokeForceCleanup()
+		return
+	}
 	if m.isExitEvent(evt.Type) {
 		m.transition(StateExiting)
 		m.invokeCleanup()
@@ -305,6 +322,18 @@ func (m *Machine) handleEvent(evt Event) {
 		// игнор
 	default:
 		m.logger.Debugf("state machine: unknown state %s", m.ctx.State)
+	}
+	if evt.Type == EventSysCleanupDone {
+		payload, _ := evt.Payload.(CleanupResultPayload)
+		if m.callbacks.ShowCleanupDone != nil {
+			m.callbacks.ShowCleanupDone(len(payload.Errors) > 0)
+			return
+		}
+		if len(payload.Errors) == 0 {
+			m.showTransient("Очистка завершена")
+		} else {
+			m.showTransient("Очистка завершена с ошибками")
+		}
 	}
 }
 
@@ -397,8 +426,7 @@ func (m *Machine) handleSyncInProgress(evt Event) {
 	switch evt.Type {
 	case EventSysSyncSuccess:
 		payload, _ := evt.Payload.(SyncSuccessPayload)
-		m.ctx.ServersList = payload.Servers
-		m.ctx.RoutesProfiles = payload.Routes
+		m.ctx.Profiles = payload.Profiles
 		m.ctx.UI.StatusText = "Подготовка окружения"
 		m.transition(StatePreparingEnv)
 		m.invokePrepareEnv()
@@ -457,21 +485,15 @@ func (m *Machine) handlePreparingEnv(evt Event) {
 
 func (m *Machine) handleReady(evt Event) {
 	switch evt.Type {
-	case EventUISelectServer:
-		if payload, ok := evt.Payload.(SelectionPayload); ok {
-			m.ctx.SelectedServerID = payload.ID
-			m.ctx.UI.SelectedServerID = payload.ID
-			m.refreshUI()
-		}
-	case EventUISelectRoute:
+	case EventUISelectProfile:
 		if payload, ok := evt.Payload.(SelectionPayload); ok {
 			m.ctx.SelectedProfileID = payload.ID
 			m.ctx.UI.SelectedProfileID = payload.ID
 			m.refreshUI()
 		}
 	case EventUIClickConnect, EventTrayConnect:
-		if m.ctx.SelectedServerID == "" || m.ctx.SelectedProfileID == "" {
-			m.showTransient("Выберите сервер и профиль маршрутов")
+		if m.ctx.SelectedProfileID == "" {
+			m.showTransient("Выберите профиль")
 			return
 		}
 		m.pendingPF = false
@@ -567,8 +589,8 @@ func (m *Machine) handleErrorState(evt Event) {
 		return
 	}
 	if (evt.Type == EventUIClickConnect || evt.Type == EventTrayConnect) && m.ctx.LastError != nil && (m.ctx.LastError.Kind == ErrorKindProcessFailed || m.ctx.LastError.Kind == ErrorKindRoutingFailed) {
-		if m.ctx.SelectedServerID == "" || m.ctx.SelectedProfileID == "" {
-			m.showTransient("Выберите сервер и профиль маршрутов")
+		if m.ctx.SelectedProfileID == "" {
+			m.showTransient("Выберите профиль")
 			return
 		}
 		m.ctx.UI.StatusText = "Подключение..."
@@ -677,6 +699,12 @@ func (m *Machine) invokeConnect() {
 func (m *Machine) invokeDisconnect() {
 	if m.callbacks.StartDisconnecting != nil {
 		m.runAsync(func() { m.callbacks.StartDisconnecting(m.ctx) })
+	}
+}
+
+func (m *Machine) invokeForceCleanup() {
+	if m.callbacks.ForceCleanup != nil {
+		m.runAsync(func() { m.callbacks.ForceCleanup(m.ctx) })
 	}
 }
 

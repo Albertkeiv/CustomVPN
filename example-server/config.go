@@ -9,11 +9,10 @@ import (
 
 // ServerConfig represents the server configuration
 type ServerConfig struct {
-	ListenAddr   string `yaml:"listen_addr"`
-	UserLogin    string `yaml:"user_login"`
+	ListenAddr  string `yaml:"listen_addr"`
+	UserLogin   string `yaml:"user_login"`
 	UserPassword string `yaml:"user_password"`
-	ServersDir   string `yaml:"servers_dir"`
-	RoutesDir    string `yaml:"routes_dir"`
+	ProfilesDir string `yaml:"profiles_dir"`
 }
 
 // LoadServerConfig loads the server configuration from server-config.yaml

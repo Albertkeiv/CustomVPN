@@ -19,6 +19,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"fyne.io/systray"
 	"golang.org/x/text/encoding/charmap"
 )
 
@@ -48,22 +49,24 @@ type Manager struct {
 	mainStatus              *widget.Label
 	statusCircle            *canvas.Circle
 	spinner                 *widget.ProgressBarInfinite
-	serverList              *widget.List
-	routeList               *widget.List
-	servers                 []state.Server
-	routes                  []state.RouteProfile
+	profileList             *widget.List
+	profiles                []state.Profile
 	connectBtn              *widget.Button
 	disconnectBtn           *widget.Button
 	settingsBtn             *widget.Button
 	exitBtn                 *widget.Button
+	cleanupDialog           *dialog.CustomDialog
+	cleanupDialogLabel      *widget.Label
+	cleanupDialogButton     *widget.Button
+	cleanupDialogParent     fyne.Window
 	suppressCredEvents      bool
-	suppressServerSelection bool
-	suppressRouteSelection  bool
+	suppressProfileSelect   bool
 	updateCh                chan uiSnapshot
 	stopCh                  chan struct{}
 	runOnce                 sync.Once
 	shutdownOnce            sync.Once
 	wg                      sync.WaitGroup
+	lastShownLogin          bool
 }
 
 // uiSnapshot переносит срез состояния UI из state machine в goroutine UI.
@@ -72,15 +75,13 @@ type uiSnapshot struct {
 	MainVisible         bool
 	IsConnecting        bool
 	IsConnected         bool
-	SelectedServerID    string
 	SelectedProfileID   string
 	StatusText          string
 	CanLogin            bool
 	AllowPreflightRetry bool
 	LoginInput          string
 	PasswordInput       string
-	Servers             []state.Server
-	Routes              []state.RouteProfile
+	Profiles            []state.Profile
 }
 
 // NewManager создаёт новый UI Manager.
@@ -102,9 +103,11 @@ func NewManager(opts Options) *Manager {
 		dispatch: opts.Dispatch,
 		updateCh: make(chan uiSnapshot, 16),
 		stopCh:   make(chan struct{}),
+		lastShownLogin: true,
 	}
 	m.buildLoginWindow()
 	m.buildMainWindow()
+	m.setupTray()
 	return m
 }
 
@@ -187,6 +190,7 @@ func (m *Manager) ShowLoginWindow(_ *state.AppContext) {
 				}
 			}
 			m.loginWinVisible = true
+			m.lastShownLogin = true
 		}
 	})
 }
@@ -202,6 +206,7 @@ func (m *Manager) ShowMainWindow(_ *state.AppContext) {
 			m.mainWin.Show()
 			m.mainWin.RequestFocus()
 			m.mainWinVisible = true
+			m.lastShownLogin = false
 		}
 	})
 }
@@ -209,6 +214,10 @@ func (m *Manager) ShowMainWindow(_ *state.AppContext) {
 // HideMainWindow скрывает главное окно.
 func (m *Manager) HideMainWindow(_ *state.AppContext) {
 	m.callOnUI(func() {
+		if m.loginWin != nil {
+			m.loginWin.Hide()
+			m.loginWinVisible = false
+		}
 		if m.mainWin != nil {
 			m.mainWin.Hide()
 			m.mainWinVisible = false
@@ -226,15 +235,13 @@ func (m *Manager) UpdateUI(ctx *state.AppContext) {
 		MainVisible:         ctx.UI.IsMainVisible,
 		IsConnecting:        ctx.UI.IsConnecting,
 		IsConnected:         ctx.UI.IsConnected,
-		SelectedServerID:    ctx.UI.SelectedServerID,
 		SelectedProfileID:   ctx.UI.SelectedProfileID,
 		StatusText:          ctx.UI.StatusText,
 		CanLogin:            ctx.UI.CanLogin,
 		AllowPreflightRetry: ctx.UI.AllowPreflightRetry,
 		LoginInput:          ctx.UI.LoginInput,
 		PasswordInput:       ctx.UI.PasswordInput,
-		Servers:             append([]state.Server(nil), ctx.ServersList...),
-		Routes:              append([]state.RouteProfile(nil), ctx.RoutesProfiles...),
+		Profiles:            append([]state.Profile(nil), ctx.Profiles...),
 	}
 	select {
 	case <-m.stopCh:
@@ -278,6 +285,42 @@ func (m *Manager) ShowTransientNotice(message string) {
 	})
 }
 
+// ShowCleanupStarted shows a single cleanup dialog without an enabled close button.
+func (m *Manager) ShowCleanupStarted() {
+	m.callOnUI(func() {
+		m.ensureCleanupDialog()
+		if m.cleanupDialogLabel != nil {
+			m.cleanupDialogLabel.SetText("Очистка начата")
+		}
+		if m.cleanupDialogButton != nil {
+			m.cleanupDialogButton.Disable()
+		}
+		if m.cleanupDialog != nil {
+			m.cleanupDialog.Show()
+		}
+	})
+}
+
+// ShowCleanupDone updates the cleanup dialog to a finished state.
+func (m *Manager) ShowCleanupDone(hasErrors bool) {
+	m.callOnUI(func() {
+		m.ensureCleanupDialog()
+		if m.cleanupDialogLabel != nil {
+			if hasErrors {
+				m.cleanupDialogLabel.SetText("Очистка завершена с ошибками")
+			} else {
+				m.cleanupDialogLabel.SetText("Очистка завершена")
+			}
+		}
+		if m.cleanupDialogButton != nil {
+			m.cleanupDialogButton.Enable()
+		}
+		if m.cleanupDialog != nil {
+			m.cleanupDialog.Show()
+		}
+	})
+}
+
 func (m *Manager) processUpdates() {
 	for {
 		select {
@@ -297,8 +340,7 @@ func (m *Manager) applySnapshot(snap uiSnapshot) {
 			m.mainStatus.SetText(snap.StatusText)
 		}
 		m.updateCredentials(snap.LoginInput, snap.PasswordInput)
-		m.updateServers(snap.Servers, snap.SelectedServerID)
-		m.updateRoutes(snap.Routes, snap.SelectedProfileID)
+		m.updateProfiles(snap.Profiles, snap.SelectedProfileID)
 		m.updateButtons(snap)
 		m.updateStatusIndicator(snap)
 	})
@@ -318,47 +360,28 @@ func (m *Manager) updateCredentials(login, password string) {
 	m.suppressCredEvents = false
 }
 
-func (m *Manager) updateServers(list []state.Server, selectedID string) {
-	m.servers = list
-	if m.serverList == nil {
+func (m *Manager) updateProfiles(list []state.Profile, selectedID string) {
+	m.profiles = list
+	if m.profileList == nil {
 		return
 	}
-	m.serverList.Refresh()
+	m.profileList.Refresh()
 	if selectedID == "" {
-		m.suppressServerSelection = true
-		m.serverList.UnselectAll()
-		m.suppressServerSelection = false
+		m.suppressProfileSelect = true
+		m.profileList.UnselectAll()
+		m.suppressProfileSelect = false
 		return
 	}
-	if idx := findServerIndex(list, selectedID); idx >= 0 {
-		m.suppressServerSelection = true
-		m.serverList.Select(idx)
-		m.suppressServerSelection = false
-	}
-}
-
-func (m *Manager) updateRoutes(list []state.RouteProfile, selectedID string) {
-	m.routes = list
-	if m.routeList == nil {
-		return
-	}
-	m.routeList.Refresh()
-	if selectedID == "" {
-		m.suppressRouteSelection = true
-		m.routeList.UnselectAll()
-		m.suppressRouteSelection = false
-		return
-	}
-	if idx := findRouteIndex(list, selectedID); idx >= 0 {
-		m.suppressRouteSelection = true
-		m.routeList.Select(idx)
-		m.suppressRouteSelection = false
+	if idx := findProfileIndex(list, selectedID); idx >= 0 {
+		m.suppressProfileSelect = true
+		m.profileList.Select(idx)
+		m.suppressProfileSelect = false
 	}
 }
 
 func (m *Manager) updateButtons(snap uiSnapshot) {
 	if m.connectBtn != nil {
-		if snap.MainVisible && !snap.IsConnecting && !snap.IsConnected && snap.SelectedServerID != "" && snap.SelectedProfileID != "" {
+		if snap.MainVisible && !snap.IsConnecting && !snap.IsConnected && snap.SelectedProfileID != "" {
 			m.connectBtn.Enable()
 		} else {
 			m.connectBtn.Disable()
@@ -372,11 +395,7 @@ func (m *Manager) updateButtons(snap uiSnapshot) {
 		}
 	}
 	if m.settingsBtn != nil {
-		if snap.MainVisible && !snap.IsConnecting {
-			m.settingsBtn.Enable()
-		} else {
-			m.settingsBtn.Disable()
-		}
+		m.settingsBtn.Disable()
 	}
 }
 
@@ -459,6 +478,7 @@ func (m *Manager) buildLoginWindow() {
 	retryButton := widget.NewButton("Повторить проверку", m.handleRetryPreflight)
 	retryButton.Hide()
 	m.retryBtn = retryButton
+	cleanupButton := widget.NewButton("Починка", func() { m.sendSimpleEvent(state.EventUIClickCleanup) })
 
 	fields := container.NewVBox(
 		widget.NewLabelWithStyle("Логин", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -470,12 +490,14 @@ func (m *Manager) buildLoginWindow() {
 	form := container.NewVBox(fields, loginButton, layout.NewSpacer())
 	statusSlot := canvas.NewRectangle(color.Transparent)
 	statusSlot.SetMinSize(fyne.NewSize(0, 72))
-	statusBox := container.NewVBox(m.loginStatus, retryButton)
+	statusBox := container.NewVBox(m.loginStatus, retryButton, cleanupButton)
 	statusArea := container.NewVBox(widget.NewSeparator(), container.NewMax(statusSlot, statusBox))
 	content := container.NewBorder(header, statusArea, nil, nil, form)
 	win.SetContent(container.NewPadded(content))
 	win.SetCloseIntercept(func() {
-		m.handleExitRequested()
+		m.sendSimpleEvent(state.EventTrayHideWindow)
+		win.Hide()
+		m.loginWinVisible = false
 	})
 	win.Show()
 	m.loginWin = win
@@ -487,50 +509,33 @@ func (m *Manager) buildMainWindow() {
 	}
 	win := m.app.NewWindow(m.appName)
 	win.Resize(fyne.NewSize(920, 560))
+	win.SetFixedSize(true)
 	m.statusCircle = canvas.NewCircle(theme.DisabledColor())
 	m.statusCircle.Resize(fyne.NewSize(14, 14))
 	m.mainStatus = widget.NewLabel("Отключено")
 	m.spinner = widget.NewProgressBarInfinite()
 	m.spinner.Hide()
 
-	m.serverList = widget.NewList(
-		func() int { return len(m.servers) },
+	m.profileList = widget.NewList(
+		func() int { return len(m.profiles) },
 		func() fyne.CanvasObject { return widget.NewLabel("") },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			label := obj.(*widget.Label)
-			if id < 0 || id >= len(m.servers) {
-				label.SetText("—")
+			if id < 0 || id >= len(m.profiles) {
+				label.SetText("-")
 				return
 			}
-			server := m.servers[id]
-			country := strings.ToUpper(strings.TrimSpace(server.Country))
+			profile := m.profiles[id]
+			country := strings.ToUpper(strings.TrimSpace(profile.Country))
 			if country == "" {
 				country = "?"
 			}
-			label.SetText(fmt.Sprintf("%s (%s)", server.Name, country))
+			label.SetText(fmt.Sprintf("%s (%s)", profile.Name, country))
 		},
 	)
-	m.serverList.OnSelected = m.handleServerSelected
+	m.profileList.OnSelected = m.handleProfileSelected
 
-	m.routeList = widget.NewList(
-		func() int { return len(m.routes) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			label := obj.(*widget.Label)
-			if id < 0 || id >= len(m.routes) {
-				label.SetText("—")
-				return
-			}
-			profile := m.routes[id]
-			label.SetText(profile.Name)
-		},
-	)
-	m.routeList.OnSelected = m.handleRouteSelected
-
-	serversCard := widget.NewCard("Серверы", "", container.NewMax(m.serverList))
-	routesCard := widget.NewCard("Профили маршрутов", "", container.NewMax(m.routeList))
-	split := container.NewHSplit(serversCard, routesCard)
-	split.SetOffset(0.5)
+	profilesCard := widget.NewCard("Профили", "", container.NewMax(m.profileList))
 
 	statusBar := container.NewHBox(
 		m.statusCircle,
@@ -543,14 +548,16 @@ func (m *Manager) buildMainWindow() {
 	m.connectBtn = widget.NewButton("Подключиться", func() { m.sendSimpleEvent(state.EventUIClickConnect) })
 	m.disconnectBtn = widget.NewButton("Отключиться", func() { m.sendSimpleEvent(state.EventUIClickDisconnect) })
 	m.settingsBtn = widget.NewButton("Настройки", func() { m.sendSimpleEvent(state.EventUIOpenSettings) })
+	cleanupBtn := widget.NewButton("Починка", func() { m.sendSimpleEvent(state.EventUIClickCleanup) })
 	m.exitBtn = widget.NewButton("Выход", func() { m.sendSimpleEvent(state.EventUIExit) })
 
-	controls := container.NewGridWithColumns(4, m.connectBtn, m.disconnectBtn, m.settingsBtn, m.exitBtn)
-	mainContent := container.NewBorder(statusBar, controls, nil, nil, split)
+	controls := container.NewGridWithColumns(5, m.connectBtn, m.disconnectBtn, m.settingsBtn, cleanupBtn, m.exitBtn)
+	mainContent := container.NewBorder(statusBar, controls, nil, nil, profilesCard)
 	win.SetContent(container.NewPadded(mainContent))
 	win.SetCloseIntercept(func() {
-		m.sendSimpleEvent(state.EventUICloseWindow)
+		m.sendSimpleEvent(state.EventTrayHideWindow)
 		win.Hide()
+		m.mainWinVisible = false
 	})
 	win.Hide()
 	m.mainWin = win
@@ -581,29 +588,16 @@ func (m *Manager) handleCredentialsEdited() {
 	m.dispatchEvent(evt)
 }
 
-func (m *Manager) handleServerSelected(id widget.ListItemID) {
-	if m.suppressServerSelection {
+func (m *Manager) handleProfileSelected(id widget.ListItemID) {
+	if m.suppressProfileSelect {
 		return
 	}
-	if id < 0 || int(id) >= len(m.servers) {
+	if id < 0 || int(id) >= len(m.profiles) {
 		return
 	}
-	server := m.servers[id]
-	payload := state.SelectionPayload{ID: server.ID}
-	evt := state.Event{Type: state.EventUISelectServer, Payload: payload, TS: time.Now()}
-	m.dispatchEvent(evt)
-}
-
-func (m *Manager) handleRouteSelected(id widget.ListItemID) {
-	if m.suppressRouteSelection {
-		return
-	}
-	if id < 0 || int(id) >= len(m.routes) {
-		return
-	}
-	profile := m.routes[id]
+	profile := m.profiles[id]
 	payload := state.SelectionPayload{ID: profile.ID}
-	evt := state.Event{Type: state.EventUISelectRoute, Payload: payload, TS: time.Now()}
+	evt := state.Event{Type: state.EventUISelectProfile, Payload: payload, TS: time.Now()}
 	m.dispatchEvent(evt)
 }
 
@@ -653,6 +647,94 @@ func (m *Manager) callOnUI(fn func()) {
 	fn()
 }
 
+func (m *Manager) ensureCleanupDialog() {
+	parent := m.activeWindow()
+	if m.cleanupDialog != nil && parent == m.cleanupDialogParent {
+		return
+	}
+	if m.cleanupDialog != nil {
+		m.cleanupDialog.Hide()
+	}
+	label := widget.NewLabel("Очистка начата")
+	button := widget.NewButton("OK", func() {
+		if m.cleanupDialog != nil {
+			m.cleanupDialog.Hide()
+		}
+	})
+	button.Disable()
+	content := container.NewVBox(label, button)
+	dialog := dialog.NewCustomWithoutButtons("Починка", content, parent)
+	m.cleanupDialog = dialog
+	m.cleanupDialogLabel = label
+	m.cleanupDialogButton = button
+	m.cleanupDialogParent = parent
+}
+
+func (m *Manager) setupTray() {
+	if m.app == nil {
+		return
+	}
+	showItem := fyne.NewMenuItem("Показать", func() { m.sendSimpleEvent(state.EventTrayShowWindow) })
+	hideItem := fyne.NewMenuItem("Скрыть", func() { m.sendSimpleEvent(state.EventTrayHideWindow) })
+	menu := fyne.NewMenu(m.appName, showItem, hideItem)
+	tray := m.trayApp()
+	if tray == nil {
+		return
+	}
+	tray.SetSystemTrayMenu(menu)
+	tray.SetSystemTrayIcon(theme.FyneLogo())
+	systray.SetOnTapped(func() { m.toggleTrayWindow() })
+}
+
+func (m *Manager) trayApp() interface {
+	SetSystemTrayMenu(*fyne.Menu)
+	SetSystemTrayIcon(fyne.Resource)
+} {
+	if m.app == nil {
+		return nil
+	}
+	tray, ok := m.app.(interface {
+		SetSystemTrayMenu(*fyne.Menu)
+		SetSystemTrayIcon(fyne.Resource)
+	})
+	if !ok {
+		if m.logger != nil {
+			m.logger.Errorf("system tray is not supported by current fyne app")
+		}
+		return nil
+	}
+	return tray
+}
+
+func (m *Manager) toggleTrayWindow() {
+	m.callOnUI(func() {
+		if m.loginWinVisible || m.mainWinVisible {
+			if m.loginWin != nil {
+				m.loginWin.Hide()
+				m.loginWinVisible = false
+			}
+			if m.mainWin != nil {
+				m.mainWin.Hide()
+				m.mainWinVisible = false
+			}
+			return
+		}
+		if m.lastShownLogin && m.loginWin != nil {
+			m.loginWin.Show()
+			if canvas := m.loginWin.Canvas(); canvas != nil && m.loginEntry != nil {
+				canvas.Focus(m.loginEntry)
+			}
+			m.loginWinVisible = true
+			return
+		}
+		if m.mainWin != nil {
+			m.mainWin.Show()
+			m.mainWin.RequestFocus()
+			m.mainWinVisible = true
+		}
+	})
+}
+
 func normalizeUserText(message string) string {
 	message = strings.TrimSpace(message)
 	if message == "" {
@@ -671,16 +753,7 @@ func normalizeUserText(message string) string {
 	return message
 }
 
-func findServerIndex(list []state.Server, id string) int {
-	for i, srv := range list {
-		if srv.ID == id {
-			return i
-		}
-	}
-	return -1
-}
-
-func findRouteIndex(list []state.RouteProfile, id string) int {
+func findProfileIndex(list []state.Profile, id string) int {
 	for i, profile := range list {
 		if profile.ID == id {
 			return i

@@ -38,10 +38,7 @@ example-server/example-server.exe
 logs/
 
 # Example server configs
-example-server/servers/*.json
-!example-server/servers/*.json.example
-example-server/routes/*.json
-!example-server/routes/*.json.example
+example-server/profiles/*.json
 client/logs/*.log
 
 # bin
@@ -49,3 +46,4 @@ client/bin/
 
 # Core_config
 client/core_config/
+

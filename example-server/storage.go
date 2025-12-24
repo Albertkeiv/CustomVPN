@@ -8,12 +8,11 @@ import (
 var (
 	users   = make(map[string]*User)
 	tokens  = make(map[string]*AuthToken)
-	servers = make(map[string]*Server)
-	routes  = make(map[string]*RouteProfile)
+	profiles = make(map[string]*Profile)
 )
 
 // InitStorage initializes the storage with config data
-func InitStorage(config *ServerConfig, serverDTOs []ServerDTO, routeDTOs []RouteProfileDTO) {
+func InitStorage(config *ServerConfig, profileDTOs []ProfileDTO) {
 	// Add user
 	user := &User{
 		ID:       config.UserLogin,
@@ -22,29 +21,21 @@ func InitStorage(config *ServerConfig, serverDTOs []ServerDTO, routeDTOs []Route
 	}
 	users[user.Login] = user
 
-	// Add servers
-	for _, dto := range serverDTOs {
-		server := &Server{
-			ID:         dto.ID,
-			Name:       dto.Name,
-			Country:    dto.Country,
-			Host:       dto.Host,
-			Port:       dto.Port,
-			CoreConfig: dto.CoreConfig,
-		}
-		servers[server.ID] = server
-	}
-
-	// Add routes
-	for _, dto := range routeDTOs {
-		route := &RouteProfile{
+	// Add profiles
+	for _, dto := range profileDTOs {
+		profile := &Profile{
 			ID:           dto.ID,
 			Name:         dto.Name,
+			Country:      dto.Country,
+			Host:         dto.Host,
+			Port:         dto.Port,
+			CoreConfig:   dto.CoreConfig,
 			DirectRoutes: dto.DirectRoutes,
 			TunnelRoutes: dto.TunnelRoutes,
+			KillSwitch:  dto.KillSwitch,
 		}
-		routes[route.ID] = route
+		profiles[profile.ID] = profile
 	}
 
-	log.Printf("Loaded %d users, %d servers, %d routes", len(users), len(servers), len(routes))
+	log.Printf("Loaded %d users, %d profiles", len(users), len(profiles))
 }

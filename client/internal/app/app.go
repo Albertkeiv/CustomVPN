@@ -79,6 +79,7 @@ func New(cfg *config.Config, logger *logging.Logger) (*Application, error) {
 		StartPrepareEnv:     app.startPrepareEnv,
 		StartConnecting:     app.startConnecting,
 		StartDisconnecting:  app.startDisconnecting,
+		ForceCleanup:        app.forceCleanup,
 		CleanupAndExit:      app.cleanupAndExit,
 		ShowLoginWindow:     uiManager.ShowLoginWindow,
 		ShowMainWindow:      uiManager.ShowMainWindow,
@@ -86,6 +87,8 @@ func New(cfg *config.Config, logger *logging.Logger) (*Application, error) {
 		UpdateUI:            uiManager.UpdateUI,
 		ShowModalError:      uiManager.ShowModalError,
 		ShowTransientNotice: uiManager.ShowTransientNotice,
+		ShowCleanupStarted:  uiManager.ShowCleanupStarted,
+		ShowCleanupDone:     uiManager.ShowCleanupDone,
 	}
 	app.machine = state.NewMachine(stateCtx, logger, callbacks)
 	return app, nil

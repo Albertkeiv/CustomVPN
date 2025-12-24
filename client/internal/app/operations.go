@@ -2,6 +2,7 @@
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -211,27 +212,23 @@ func (a *Application) startSync(appCtx *state.AppContext) {
 		a.dispatch(state.Event{Type: state.EventSysSyncFailure, Payload: payload})
 		return
 	}
-	serversCtx, cancelServers := a.requestContext(requestTimeout)
-	servers, err := a.control.SyncServers(serversCtx, authToken)
-	cancelServers()
+	profilesCtx, cancelProfiles := a.requestContext(requestTimeout)
+	profiles, err := a.control.SyncProfileList(profilesCtx, authToken)
+	cancelProfiles()
 	if err != nil {
-		a.logger.Errorf("sync servers failed: %v", err)
-		payload := buildSyncFailurePayload(err, "Не удалось загрузить список серверов")
+		a.logger.Errorf("sync profiles failed: %v", err)
+		payload := buildSyncFailurePayload(err, "Не удалось загрузить список профилей")
 		a.dispatch(state.Event{Type: state.EventSysSyncFailure, Payload: payload})
 		return
 	}
-	routesCtx, cancelRoutes := a.requestContext(requestTimeout)
-	routes, err := a.control.SyncRoutes(routesCtx, authToken)
-	cancelRoutes()
-	if err != nil {
-		a.logger.Errorf("sync routes failed: %v", err)
-		payload := buildSyncFailurePayload(err, "Не удалось загрузить список маршрутов")
-		a.dispatch(state.Event{Type: state.EventSysSyncFailure, Payload: payload})
-		return
+	if a.logger != nil {
+		for _, profile := range profiles {
+			a.logger.Infof("sync profiles: id=%s", profile.ID)
+		}
 	}
-	payload := state.SyncSuccessPayload{Servers: servers, Routes: routes}
+	payload := state.SyncSuccessPayload{Profiles: profiles}
 	if err := a.dispatch(state.Event{Type: state.EventSysSyncSuccess, Payload: payload}); err == nil {
-		a.logger.Infof("sync completed: %d servers, %d profiles", len(servers), len(routes))
+		a.logger.Infof("sync completed: %d profiles", len(profiles))
 	}
 }
 
@@ -288,6 +285,79 @@ func (a *Application) startDisconnecting(ctx *state.AppContext) {
 		a.logger.Infof("disconnecting scenario completed")
 	}
 	a.dispatch(state.Event{Type: state.EventSysDisconnectingDone})
+}
+
+func (a *Application) forceCleanup(ctx *state.AppContext) {
+	if a == nil {
+		return
+	}
+	if a.logger != nil {
+		a.logger.Debugf("cleanup requested")
+	}
+	var errs []string
+	saved, savedErr := a.loadCleanupState()
+	if savedErr != nil && a.logger != nil {
+		a.logger.Errorf("cleanup: load state failed: %v", savedErr)
+	}
+	if saved != nil && saved.CorePID > 0 {
+		if a.logger != nil {
+			a.logger.Debugf("cleanup: stopping core pid=%d", saved.CorePID)
+		}
+		if proc, err := os.FindProcess(saved.CorePID); err == nil {
+			if err := proc.Kill(); err != nil {
+				errs = append(errs, err.Error())
+				if a.logger != nil {
+					a.logger.Errorf("cleanup core pid failed: %v", err)
+				}
+			}
+		}
+	}
+	if a.logger != nil {
+		a.logger.Debugf("cleanup: stopping core process")
+	}
+	a.stopProcess(state.ProcessCore, processStopTimeout)
+	if a.logger != nil {
+		a.logger.Debugf("cleanup: removing kill switch rules")
+	}
+	if saved != nil && len(saved.KillSwitchRules) > 0 {
+		a.removeKillSwitch(nil, saved.KillSwitchRules)
+	} else if ctx != nil {
+		a.removeKillSwitch(ctx, nil)
+	}
+	if a.firewall != nil {
+		if a.logger != nil {
+			a.logger.Debugf("cleanup: removing kill switch group")
+		}
+		firewallCtx, cancel := a.requestContext(routeOpTimeout)
+		if err := a.firewall.RemoveKillSwitchGroup(firewallCtx); err != nil {
+			errs = append(errs, err.Error())
+			if a.logger != nil {
+				a.logger.Errorf("cleanup firewall group failed: %v", err)
+			}
+		}
+		cancel()
+	}
+	if a.routes != nil && ctx != nil {
+		if a.logger != nil {
+			a.logger.Debugf("cleanup: removing route records")
+		}
+		records := ctx.RoutesRegistry.ListByKinds(state.RouteKindDirect, state.RouteKindTunnel)
+		for _, record := range records {
+			if err := a.removeRouteRecord(ctx, record); err != nil {
+				errs = append(errs, err.Error())
+				if a.logger != nil {
+					a.logger.Errorf("cleanup route %s failed: %v", record.Destination, err)
+				}
+			}
+		}
+	}
+	if saved != nil {
+		a.cleanupRoutesFromState(saved, &errs)
+	}
+	if a.machine != nil {
+		_ = a.dispatch(state.Event{Type: state.EventSysCleanupDone, Payload: state.CleanupResultPayload{Errors: errs}})
+	}
+	_ = a.deleteCleanupState()
 }
 
 func (a *Application) launchProcess(name state.ProcessName, binary, logFile string, args []string) (*state.ProcessRecord, error) {
@@ -388,27 +458,33 @@ func (a *Application) executeConnecting(ctx *state.AppContext, artifacts *connec
 		return newScenarioError(state.ErrorKindRoutingFailed, prepareGatewayErrorMessage(err), err)
 	}
 	ctx.DefaultGateway = gateway
-	server := ctx.FindServer(ctx.SelectedServerID)
-	if server == nil {
-		return newScenarioError(state.ErrorKindConfigFailed, "Не удалось найти выбранный сервер", fmt.Errorf("server %s not found", ctx.SelectedServerID))
-	}
-	if strings.TrimSpace(server.Host) == "" {
-		return newScenarioError(state.ErrorKindConfigFailed, "Сервер не содержит адрес", fmt.Errorf("server host is empty"))
-	}
-	if server.Port <= 0 {
-		return newScenarioError(state.ErrorKindConfigFailed, "Сервер не содержит корректный порт", fmt.Errorf("server port %d invalid", server.Port))
-	}
-	profile := ctx.FindRouteProfile(ctx.SelectedProfileID)
+	profile := ctx.FindProfile(ctx.SelectedProfileID)
 	if profile == nil {
-		return newScenarioError(state.ErrorKindConfigFailed, "Не удалось найти профиль маршрутов", fmt.Errorf("profile %s not found", ctx.SelectedProfileID))
+		return newScenarioError(state.ErrorKindConfigFailed, "Не удалось найти выбранный профиль", fmt.Errorf("profile %s not found", ctx.SelectedProfileID))
+	}
+	if len(profile.CoreConfigRaw) == 0 {
+		profileCtx, cancel := a.requestContext(requestTimeout)
+		fullProfile, err := a.control.SyncProfile(profileCtx, ctx.AuthToken, profile.ID)
+		cancel()
+		if err != nil {
+			return newScenarioError(state.ErrorKindSyncFailed, "Не удалось загрузить профиль", err)
+		}
+		*profile = fullProfile
+	}
+	if strings.TrimSpace(profile.Host) == "" {
+		return newScenarioError(state.ErrorKindConfigFailed, "Профиль не содержит адрес", fmt.Errorf("profile host is empty"))
+	}
+	if profile.Port <= 0 {
+		return newScenarioError(state.ErrorKindConfigFailed, "Профиль не содержит корректный порт", fmt.Errorf("profile port %d invalid", profile.Port))
 	}
 	if err := a.addProfileRoutes(ctx, profile.DirectRoutes, state.RouteKindDirect, ctx.DefaultGateway, artifacts); err != nil {
 		return err
 	}
-	if err := a.applyKillSwitch(ctx, artifacts); err != nil {
+	if err := a.applyKillSwitch(ctx, profile, artifacts); err != nil {
 		return err
 	}
-	configPath, err := a.writeCoreConfig(server)
+	a.saveCleanupState(ctx)
+	configPath, err := a.writeCoreConfig(profile)
 	if err != nil {
 		return newScenarioError(state.ErrorKindConfigFailed, "Не удалось записать конфигурацию Core", err)
 	}
@@ -420,9 +496,15 @@ func (a *Application) executeConnecting(ctx *state.AppContext, artifacts *connec
 		return newScenarioError(state.ErrorKindProcessFailed, "Не удалось запустить Core", err)
 	}
 	artifacts.coreStarted = true
+	a.saveCleanupState(ctx)
 	tunnelGateway, err := a.waitForTunnelGateway(tunnelDetectTimeout)
 	if err != nil {
 		return newScenarioError(state.ErrorKindRoutingFailed, "Не удалось определить интерфейс туннеля", err)
+	}
+	if err := deleteCoreConfigFile(profile.CoreConfigFilePath); err != nil {
+		a.logger.Errorf("cleanup core config failed: %v", err)
+	} else {
+		profile.CoreConfigFilePath = ""
 	}
 	if err := a.applyTunnelDNS(ctx, tunnelGateway, artifacts); err != nil {
 		return err
@@ -430,15 +512,24 @@ func (a *Application) executeConnecting(ctx *state.AppContext, artifacts *connec
 	if err := a.addProfileRoutes(ctx, profile.TunnelRoutes, state.RouteKindTunnel, tunnelGateway, artifacts); err != nil {
 		return err
 	}
+	a.saveCleanupState(ctx)
 	return nil
 }
 
 func (a *Application) executeDisconnecting(ctx *state.AppContext) error {
 	a.stopProcess(state.ProcessCore, processStopTimeout)
 	if ctx != nil {
+		if profile := ctx.FindProfile(ctx.SelectedProfileID); profile != nil && profile.CoreConfigFilePath != "" {
+			if err := deleteCoreConfigFile(profile.CoreConfigFilePath); err != nil {
+				a.logger.Errorf("cleanup core config failed: %v", err)
+			} else {
+				profile.CoreConfigFilePath = ""
+			}
+		}
 		a.removeKillSwitch(ctx, nil)
 	}
 	if a.routes == nil || ctx == nil {
+		_ = a.deleteCleanupState()
 		return nil
 	}
 	routes := ctx.RoutesRegistry.ListByKinds(state.RouteKindDirect, state.RouteKindTunnel)
@@ -452,26 +543,33 @@ func (a *Application) executeDisconnecting(ctx *state.AppContext) error {
 	if len(errs) > 0 {
 		return fmt.Errorf(strings.Join(errs, "; "))
 	}
+	_ = a.deleteCleanupState()
 	return nil
 }
 
-func (a *Application) writeCoreConfig(server *state.Server) (string, error) {
-	if server == nil {
-		return "", fmt.Errorf("server is nil")
+func (a *Application) writeCoreConfig(profile *state.Profile) (string, error) {
+	if profile == nil {
+		return "", fmt.Errorf("profile is nil")
 	}
-	if len(server.CoreConfigRaw) == 0 {
-		return "", fmt.Errorf("core config for server %s is empty", server.ID)
+	if len(profile.CoreConfigRaw) == 0 {
+		return "", fmt.Errorf("core config for profile %s is empty", profile.ID)
 	}
-	configDir := filepath.Join(a.cfg.AppDir, "core_config")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return "", fmt.Errorf("create core_config dir: %w", err)
+	prefix := fmt.Sprintf("customvpn_core_%s_", sanitizeFileName(profile.Name, profile.ID))
+	file, err := os.CreateTemp("", prefix+"*.json")
+	if err != nil {
+		return "", fmt.Errorf("create core config temp file: %w", err)
 	}
-	fileName := fmt.Sprintf("%s.json", sanitizeFileName(server.Name, server.ID))
-	fullPath := filepath.Join(configDir, fileName)
-	if err := os.WriteFile(fullPath, server.CoreConfigRaw, 0o600); err != nil {
+	fullPath := file.Name()
+	if _, err := file.Write(profile.CoreConfigRaw); err != nil {
+		_ = file.Close()
+		_ = os.Remove(fullPath)
 		return "", fmt.Errorf("write core config: %w", err)
 	}
-	server.CoreConfigFilePath = fullPath
+	if err := file.Close(); err != nil {
+		_ = os.Remove(fullPath)
+		return "", fmt.Errorf("close core config: %w", err)
+	}
+	profile.CoreConfigFilePath = fullPath
 	return fullPath, nil
 }
 
@@ -511,6 +609,16 @@ func (a *Application) removeRouteRecord(ctx *state.AppContext, record state.Rout
 func (a *Application) addProfileRoutes(ctx *state.AppContext, cidrs []string, kind state.RouteKind, gateway *state.GatewayInfo, artifacts *connectArtifacts) *scenarioError {
 	if a.routes == nil {
 		return newScenarioError(state.ErrorKindRoutingFailed, "Маршрутизатор не инициализирован", fmt.Errorf("route manager is nil"))
+	}
+	hasRoutes := false
+	for _, cidr := range cidrs {
+		if strings.TrimSpace(cidr) != "" {
+			hasRoutes = true
+			break
+		}
+	}
+	if !hasRoutes {
+		return nil
 	}
 	if gateway == nil || strings.TrimSpace(gateway.IP) == "" {
 		return newScenarioError(state.ErrorKindRoutingFailed, "Маршрутный шлюз не задан", fmt.Errorf("route gateway is nil"))
@@ -552,7 +660,13 @@ func (a *Application) applyTunnelDNS(ctx *state.AppContext, gateway *state.Gatew
 	return nil
 }
 
-func (a *Application) applyKillSwitch(ctx *state.AppContext, artifacts *connectArtifacts) *scenarioError {
+func (a *Application) applyKillSwitch(ctx *state.AppContext, profile *state.Profile, artifacts *connectArtifacts) *scenarioError {
+	if profile == nil || !profile.KillSwitchEnabled {
+		if a.logger != nil {
+			a.logger.Infof("kill switch disabled: skip DNS block")
+		}
+		return nil
+	}
 	if a.firewall == nil {
 		return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch не инициализирован", fmt.Errorf("firewall manager is nil"))
 	}
@@ -564,7 +678,7 @@ func (a *Application) applyKillSwitch(ctx *state.AppContext, artifacts *connectA
 	}
 	firewallCtx, cancel := a.requestContext(routeOpTimeout)
 	defer cancel()
-	rules, err := a.firewall.BlockDNSOnInterface(firewallCtx, ctx.DefaultGateway.InterfaceName)
+	rules, err := a.firewall.BlockDNSOnInterface(firewallCtx, ctx.DefaultGateway.InterfaceName, nil, a.cfg.CorePath)
 	if err != nil {
 		return newScenarioError(state.ErrorKindRoutingFailed, "Не удалось применить Kill Switch", err)
 	}
@@ -653,6 +767,124 @@ func sanitizeFileName(name string, fallback string) string {
 	return b.String()
 }
 
+func deleteCoreConfigFile(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+type cleanupState struct {
+	CorePID         int                `json:"core_pid"`
+	KillSwitchRules []string           `json:"kill_switch_rules"`
+	Routes          []state.RouteRecord `json:"routes"`
+}
+
+func (a *Application) saveCleanupState(ctx *state.AppContext) {
+	if a == nil || a.cfg == nil || ctx == nil {
+		return
+	}
+	stateFile := a.cleanupStatePath()
+	if stateFile == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(stateFile), 0o755); err != nil {
+		if a.logger != nil {
+			a.logger.Errorf("cleanup: create temp dir failed: %v", err)
+		}
+		return
+	}
+	var corePID int
+	if record, ok := ctx.ProcessRegistry.Get(state.ProcessCore); ok {
+		corePID = record.PID
+	}
+	payload := cleanupState{
+		CorePID:         corePID,
+		KillSwitchRules: append([]string{}, ctx.KillSwitchRules...),
+		Routes:          ctx.RoutesRegistry.ListByKinds(state.RouteKindDirect, state.RouteKindTunnel),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Errorf("cleanup: serialize state failed: %v", err)
+		}
+		return
+	}
+	if err := os.WriteFile(stateFile, data, 0o600); err != nil {
+		if a.logger != nil {
+			a.logger.Errorf("cleanup: write state failed: %v", err)
+		}
+	}
+}
+
+func (a *Application) loadCleanupState() (*cleanupState, error) {
+	if a == nil || a.cfg == nil {
+		return nil, nil
+	}
+	stateFile := a.cleanupStatePath()
+	if stateFile == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var payload cleanupState
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	return &payload, nil
+}
+
+func (a *Application) deleteCleanupState() error {
+	if a == nil || a.cfg == nil {
+		return nil
+	}
+	stateFile := a.cleanupStatePath()
+	if stateFile == "" {
+		return nil
+	}
+	if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func (a *Application) cleanupStatePath() string {
+	if a == nil || a.cfg == nil {
+		return ""
+	}
+	return filepath.Join(a.cfg.AppDir, "temp", "cleanup_state.json")
+}
+
+func (a *Application) cleanupRoutesFromState(saved *cleanupState, errs *[]string) {
+	if a == nil || a.routes == nil || saved == nil {
+		return
+	}
+	if a.logger != nil {
+		a.logger.Debugf("cleanup: removing routes from saved state")
+	}
+	for _, record := range saved.Routes {
+		routeCtx, cancel := a.requestContext(routeOpTimeout)
+		if err := a.routes.RemoveRoute(routeCtx, record); err != nil {
+			if errs != nil {
+				*errs = append(*errs, err.Error())
+			}
+			if a.logger != nil {
+				a.logger.Errorf("cleanup saved route %s failed: %v", record.Destination, err)
+			}
+		}
+		cancel()
+	}
+}
+
 type scenarioError struct {
 	kind    state.ErrorKind
 	message string
@@ -685,6 +917,15 @@ func (c *connectArtifacts) rollback() {
 	}
 	if c.coreStarted {
 		c.app.stopProcess(state.ProcessCore, processStopTimeout)
+		if c.ctx != nil {
+			if profile := c.ctx.FindProfile(c.ctx.SelectedProfileID); profile != nil && profile.CoreConfigFilePath != "" {
+				if err := deleteCoreConfigFile(profile.CoreConfigFilePath); err != nil {
+					c.app.logger.Errorf("cleanup core config failed: %v", err)
+				} else {
+					profile.CoreConfigFilePath = ""
+				}
+			}
+		}
 	}
 	if len(c.killSwitchRules) > 0 {
 		c.app.removeKillSwitch(c.ctx, c.killSwitchRules)
@@ -694,6 +935,7 @@ func (c *connectArtifacts) rollback() {
 			c.app.logger.Errorf("rollback remove route %s failed: %v", c.routes[i].Destination, err)
 		}
 	}
+	_ = c.app.deleteCleanupState()
 }
 
 

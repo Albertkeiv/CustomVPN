@@ -7,7 +7,5 @@ user_login: "test"
 user_password: "test"
 
 # Папка с описаниями серверов и Core-конфигурациями
-servers_dir: "./servers"
+profiles_dir: "./profiles"
 
-# Папка с профилями маршрутизации
-routes_dir: "./routes"
