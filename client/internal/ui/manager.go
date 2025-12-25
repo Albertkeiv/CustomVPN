@@ -3,6 +3,7 @@
 import (
 	"fmt"
 	"image/color"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +119,7 @@ func (m *Manager) Start() {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
+			defer m.logPanic("ui updates")
 			m.processUpdates()
 		}()
 	})
@@ -356,6 +358,15 @@ func (m *Manager) processUpdates() {
 		case snap := <-m.updateCh:
 			m.applySnapshot(snap)
 		}
+	}
+}
+
+func (m *Manager) logPanic(scope string) {
+	if r := recover(); r != nil {
+		if m.logger != nil {
+			m.logger.Errorf("panic in %s: %v\n%s", scope, r, debug.Stack())
+		}
+		panic(r)
 	}
 }
 
@@ -636,12 +647,18 @@ func (m *Manager) handleRetryPreflight() {
 
 func (m *Manager) sendSimpleEvent(t state.EventType) {
 	evt := state.Event{Type: t, TS: time.Now()}
+	if m.logger != nil {
+		m.logger.Debugf("ui event: %s", t)
+	}
 	m.dispatchEvent(evt)
 }
 
 func (m *Manager) dispatchEvent(evt state.Event) {
 	if m.dispatch == nil {
 		return
+	}
+	if m.logger != nil {
+		m.logger.Debugf("ui dispatch: %s", evt.Type)
 	}
 	if err := m.dispatch(evt); err != nil && m.logger != nil {
 		m.logger.Errorf("ui dispatch %s failed: %v", evt.Type, err)

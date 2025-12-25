@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	"customvpn/client/internal/app"
@@ -21,6 +22,7 @@ func main() {
 }
 
 func run() error {
+	debug.SetPanicOnFault(true)
 	appDir, err := config.DetectAppDir()
 	if err != nil {
 		return fmt.Errorf("determine app directory: %w", err)
@@ -40,6 +42,12 @@ func run() error {
 		return fmt.Errorf("initialize logger: %w", err)
 	}
 	defer logger.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Errorf("panic: %v\n%s", r, debug.Stack())
+			panic(r)
+		}
+	}()
 
 	baseCtx := logging.WithContext(context.Background(), logger)
 	ctx, stop := signal.NotifyContext(baseCtx, os.Interrupt, syscall.SIGTERM)

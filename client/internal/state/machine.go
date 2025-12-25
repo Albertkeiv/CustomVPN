@@ -3,6 +3,7 @@
 import (
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -182,7 +183,7 @@ func NewMachine(ctx *AppContext, logger *logging.Logger, callbacks Callbacks) *M
 // Start запускает event-loop в отдельной горутине.
 func (m *Machine) Start() {
 	m.loopOnce.Do(func() {
-		go m.loop()
+		go m.loopSafely()
 	})
 }
 
@@ -223,6 +224,9 @@ func (m *Machine) WaitAsync(timeout time.Duration) bool {
 func (m *Machine) Dispatch(evt Event) error {
 	if m.stopped.Load() {
 		return ErrMachineStopped
+	}
+	if m.logger != nil {
+		m.logger.Debugf("event queued: %s", evt.Type)
 	}
 	ch := m.events
 	if m.isExitEvent(evt.Type) {
@@ -276,9 +280,17 @@ func (m *Machine) loop() {
 	}
 }
 
+func (m *Machine) loopSafely() {
+	defer m.logPanic("state loop")
+	m.loop()
+}
+
 func (m *Machine) handleEvent(evt Event) {
 	if evt.TS.IsZero() {
 		evt.TS = time.Now()
+	}
+	if m.logger != nil {
+		m.logger.Debugf("event handle: %s state=%s", evt.Type, m.ctx.State)
 	}
 	if evt.Type == EventUIClickCleanup {
 		if m.callbacks.ShowCleanupStarted != nil {
@@ -727,8 +739,18 @@ func (m *Machine) runAsync(fn func()) {
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
+		defer m.logPanic("async task")
 		fn()
 	}()
+}
+
+func (m *Machine) logPanic(scope string) {
+	if r := recover(); r != nil {
+		if m.logger != nil {
+			m.logger.Errorf("panic in %s: %v\n%s", scope, r, debug.Stack())
+		}
+		panic(r)
+	}
 }
 
 func (m *Machine) invokeCleanup() {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"runtime"
 	"strings"
 
 	"customvpn/client/internal/logging"
@@ -38,6 +39,9 @@ func NewManager(logger *logging.Logger) *Manager {
 }
 
 func (m *Manager) BlockDNSOnInterface(ctx context.Context, iface string, _ []string, _ string) ([]string, error) {
+	if m.logger != nil {
+		m.logger.Debugf("firewall block dns start: interface=%s", iface)
+	}
 	if strings.TrimSpace(iface) == "" {
 		return nil, fmt.Errorf("interface alias is empty")
 	}
@@ -50,7 +54,13 @@ func (m *Manager) BlockDNSOnInterface(ctx context.Context, iface string, _ []str
 	}
 	localAddrs, err := interfaceAddresses(iface)
 	if err != nil {
+		if m.logger != nil {
+			m.logger.Debugf("firewall block dns failed: interface=%s error=%v", iface, err)
+		}
 		return nil, err
+	}
+	if m.logger != nil {
+		m.logger.Debugf("firewall block dns: interface=%s addr_count=%d", iface, len(localAddrs))
 	}
 	rules := []struct {
 		name     string
@@ -61,6 +71,9 @@ func (m *Manager) BlockDNSOnInterface(ctx context.Context, iface string, _ []str
 	}
 	created := make([]string, 0, len(rules))
 	err = withFirewallPolicy(func(policy *ole.IDispatch) error {
+		if m.logger != nil {
+			m.logger.Debugf("firewall policy acquired")
+		}
 		rulesDisp, cleanup, err := firewallRules(policy)
 		if err != nil {
 			return err
@@ -86,12 +99,21 @@ func (m *Manager) BlockDNSOnInterface(ctx context.Context, iface string, _ []str
 		if len(created) > 0 {
 			_ = m.RemoveRules(ctx, created)
 		}
+		if m.logger != nil {
+			m.logger.Debugf("firewall block dns failed: interface=%s error=%v", iface, err)
+		}
 		return created, err
+	}
+	if m.logger != nil {
+		m.logger.Debugf("firewall block dns done: interface=%s rules=%d", iface, len(created))
 	}
 	return created, nil
 }
 
 func (m *Manager) CheckAvailable(ctx context.Context, iface string) error {
+	if m.logger != nil {
+		m.logger.Debugf("firewall check start: interface=%s", iface)
+	}
 	if strings.TrimSpace(iface) == "" {
 		return fmt.Errorf("interface alias is empty")
 	}
@@ -103,9 +125,12 @@ func (m *Manager) CheckAvailable(ctx context.Context, iface string) error {
 		}
 	}
 	if _, err := interfaceByName(iface); err != nil {
+		if m.logger != nil {
+			m.logger.Debugf("firewall check failed: interface=%s error=%v", iface, err)
+		}
 		return fmt.Errorf("interface not found: %w", err)
 	}
-	return withFirewallPolicy(func(policy *ole.IDispatch) error {
+	err := withFirewallPolicy(func(policy *ole.IDispatch) error {
 		enabled, err := firewallEnabled(policy)
 		if err != nil {
 			return err
@@ -120,7 +145,11 @@ func (m *Manager) CheckAvailable(ctx context.Context, iface string) error {
 		} else if m.logger != nil {
 			m.logger.Debugf("firewall check: local policy modify state unavailable: %v", err)
 		}
-		allowed, err := allowLocalFirewallRules(policy, enabledProfiles(policy))
+		profiles := enabledProfiles(policy)
+		if m.logger != nil {
+			m.logger.Debugf("firewall check: enabled profiles=%v", profiles)
+		}
+		allowed, err := allowLocalFirewallRules(policy, profiles)
 		if err != nil {
 			if m.logger != nil {
 				m.logger.Debugf("firewall check: allow local rules unavailable: %v", err)
@@ -132,9 +161,22 @@ func (m *Manager) CheckAvailable(ctx context.Context, iface string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Debugf("firewall check failed: interface=%s error=%v", iface, err)
+		}
+		return err
+	}
+	if m.logger != nil {
+		m.logger.Debugf("firewall check ok: interface=%s", iface)
+	}
+	return nil
 }
 
 func (m *Manager) EnableLocalPolicyMerge(ctx context.Context) error {
+	if m.logger != nil {
+		m.logger.Debugf("firewall enable local rules start")
+	}
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
@@ -164,6 +206,9 @@ func (m *Manager) RemoveRules(ctx context.Context, rules []string) error {
 	if len(rules) == 0 {
 		return nil
 	}
+	if m.logger != nil {
+		m.logger.Debugf("firewall remove rules start: count=%d", len(rules))
+	}
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
@@ -171,7 +216,7 @@ func (m *Manager) RemoveRules(ctx context.Context, rules []string) error {
 		default:
 		}
 	}
-	return withFirewallPolicy(func(policy *ole.IDispatch) error {
+	err := withFirewallPolicy(func(policy *ole.IDispatch) error {
 		rulesDisp, cleanup, err := firewallRules(policy)
 		if err != nil {
 			return err
@@ -194,9 +239,20 @@ func (m *Manager) RemoveRules(ctx context.Context, rules []string) error {
 		}
 		return nil
 	})
+	if m.logger != nil {
+		if err != nil {
+			m.logger.Debugf("firewall remove rules failed: %v", err)
+		} else {
+			m.logger.Debugf("firewall remove rules done")
+		}
+	}
+	return err
 }
 
 func (m *Manager) RemoveKillSwitchGroup(ctx context.Context) error {
+	if m.logger != nil {
+		m.logger.Debugf("firewall remove group start: %s", killSwitchGroup)
+	}
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
@@ -204,7 +260,7 @@ func (m *Manager) RemoveKillSwitchGroup(ctx context.Context) error {
 		default:
 		}
 	}
-	return withFirewallPolicy(func(policy *ole.IDispatch) error {
+	err := withFirewallPolicy(func(policy *ole.IDispatch) error {
 		rulesDisp, cleanup, err := firewallRules(policy)
 		if err != nil {
 			return err
@@ -227,9 +283,19 @@ func (m *Manager) RemoveKillSwitchGroup(ctx context.Context) error {
 		}
 		return nil
 	})
+	if m.logger != nil {
+		if err != nil {
+			m.logger.Debugf("firewall remove group failed: %v", err)
+		} else {
+			m.logger.Debugf("firewall remove group done")
+		}
+	}
+	return err
 }
 
 func withFirewallPolicy(fn func(*ole.IDispatch) error) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
 		return fmt.Errorf("initialize COM: %w", err)
 	}

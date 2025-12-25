@@ -28,6 +28,8 @@ const (
 	connectionCheckTimeout = 5 * time.Second
 	tunnelDetectTimeout    = 10 * time.Second
 	tunnelDetectDelay      = 500 * time.Millisecond
+	killSwitchCheckAttempts = 3
+	killSwitchCheckDelay    = 500 * time.Millisecond
 )
 
 func (a *Application) startPreflight(_ *state.AppContext) {
@@ -668,6 +670,9 @@ func (a *Application) applyKillSwitch(ctx *state.AppContext, profile *state.Prof
 		}
 		return nil
 	}
+	if a.logger != nil {
+		a.logger.Debugf("kill switch start: profile=%s", profile.ID)
+	}
 	if a.firewall == nil {
 		return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch не инициализирован", fmt.Errorf("firewall manager is nil"))
 	}
@@ -677,16 +682,41 @@ func (a *Application) applyKillSwitch(ctx *state.AppContext, profile *state.Prof
 	if strings.TrimSpace(ctx.DefaultGateway.InterfaceName) == "" {
 		return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch не может определить основной интерфейс", fmt.Errorf("default gateway interface name is empty"))
 	}
-	firewallCtx, cancel := a.requestContext(routeOpTimeout)
-	if err := a.firewall.CheckAvailable(firewallCtx, ctx.DefaultGateway.InterfaceName); err != nil {
+	if a.logger != nil {
+		a.logger.Debugf("kill switch interface: %s", ctx.DefaultGateway.InterfaceName)
+	}
+	var checkErr error
+	for attempt := 1; attempt <= killSwitchCheckAttempts; attempt++ {
+		firewallCtx, cancel := a.requestContext(routeOpTimeout)
+		checkErr = a.firewall.CheckAvailable(firewallCtx, ctx.DefaultGateway.InterfaceName)
 		cancel()
-		if errors.Is(err, firewall.ErrFirewallDisabled) {
+		if checkErr == nil {
+			if a.logger != nil {
+				a.logger.Debugf("kill switch check ok: attempt=%d", attempt)
+			}
+			break
+		}
+		if errors.Is(checkErr, firewall.ErrFirewallDisabled) {
 			if a.logger != nil {
 				a.logger.Debugf("kill switch skipped: windows firewall is disabled")
 			}
 			return nil
 		}
-		if errors.Is(err, firewall.ErrLocalPolicyMergeDisabled) {
+		if errors.Is(checkErr, firewall.ErrLocalPolicyMergeDisabled) {
+			if a.logger != nil {
+				a.logger.Debugf("kill switch check requires local policy merge")
+			}
+			break
+		}
+		if a.logger != nil {
+			a.logger.Debugf("kill switch check attempt %d/%d failed: %v", attempt, killSwitchCheckAttempts, checkErr)
+		}
+		if attempt < killSwitchCheckAttempts {
+			time.Sleep(killSwitchCheckDelay)
+		}
+	}
+	if checkErr != nil {
+		if errors.Is(checkErr, firewall.ErrLocalPolicyMergeDisabled) {
 			if a.ui != nil && a.ui.ConfirmEnableLocalPolicyMerge() {
 				if a.logger != nil {
 					a.logger.Infof("attempting to enable local firewall rules")
@@ -695,6 +725,9 @@ func (a *Application) applyKillSwitch(ctx *state.AppContext, profile *state.Prof
 				enableErr := a.firewall.EnableLocalPolicyMerge(enableCtx)
 				enableCancel()
 				if enableErr != nil {
+					if a.logger != nil {
+						a.logger.Debugf("kill switch enable local rules failed: %v", enableErr)
+					}
 					if errors.Is(enableErr, firewall.ErrLocalPolicyMergeUnsupported) {
 						return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен: AllowLocalPolicyMerge не поддерживается в системе", enableErr)
 					}
@@ -706,14 +739,15 @@ func (a *Application) applyKillSwitch(ctx *state.AppContext, profile *state.Prof
 				if recheckErr != nil {
 					return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен", recheckErr)
 				}
-				firewallCtx, cancel = a.requestContext(routeOpTimeout)
+				checkErr = nil
 			} else {
-				return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен: локальные правила брандмауэра запрещены", err)
+				return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен: локальные правила брандмауэра запрещены", checkErr)
 			}
 		} else {
-			return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен", err)
+			return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен", checkErr)
 		}
 	}
+	firewallCtx, cancel := a.requestContext(routeOpTimeout)
 	defer cancel()
 	rules, err := a.firewall.BlockDNSOnInterface(firewallCtx, ctx.DefaultGateway.InterfaceName, nil, a.cfg.CorePath)
 	if err != nil {
