@@ -495,9 +495,7 @@ func (m *Manager) buildLoginWindow() {
 	content := container.NewBorder(header, statusArea, nil, nil, form)
 	win.SetContent(container.NewPadded(content))
 	win.SetCloseIntercept(func() {
-		m.sendSimpleEvent(state.EventTrayHideWindow)
-		win.Hide()
-		m.loginWinVisible = false
+		m.handleExitRequested()
 	})
 	win.Show()
 	m.loginWin = win
