@@ -17,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/lang"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"fyne.io/systray"
@@ -119,6 +120,24 @@ func (m *Manager) Start() {
 			defer m.wg.Done()
 			m.processUpdates()
 		}()
+	})
+}
+
+// SetOnStopped registers a callback fired when the app stops.
+func (m *Manager) SetOnStopped(fn func()) {
+	if m == nil || m.app == nil {
+		return
+	}
+	m.app.Lifecycle().SetOnStopped(fn)
+}
+
+// Quit requests the app to exit.
+func (m *Manager) Quit() {
+	if m == nil || m.app == nil {
+		return
+	}
+	m.callOnUI(func() {
+		m.app.Quit()
 	})
 }
 
@@ -283,6 +302,14 @@ func (m *Manager) ShowTransientNotice(message string) {
 	m.callOnUI(func() {
 		dialog.ShowInformation("CustomVPN", message, m.activeWindow())
 	})
+}
+
+// ConfirmEnableLocalPolicyMerge asks the user to allow local firewall rules.
+func (m *Manager) ConfirmEnableLocalPolicyMerge() bool {
+	return m.confirmDialog(
+		"Kill Switch",
+		"В системе запрещены локальные правила брандмауэра. Разрешить их сейчас? Для этого нужны права администратора.",
+	)
 }
 
 // ShowCleanupStarted shows a single cleanup dialog without an enabled close button.
@@ -668,13 +695,33 @@ func (m *Manager) ensureCleanupDialog() {
 	m.cleanupDialogParent = parent
 }
 
+func (m *Manager) confirmDialog(title, message string) bool {
+	if m == nil || m.app == nil {
+		return false
+	}
+	select {
+	case <-m.stopCh:
+		return false
+	default:
+	}
+	ch := make(chan bool, 1)
+	m.callOnUI(func() {
+		dialog.ShowConfirm(title, message, func(ok bool) {
+			ch <- ok
+		}, m.activeWindow())
+	})
+	return <-ch
+}
+
 func (m *Manager) setupTray() {
 	if m.app == nil {
 		return
 	}
 	showItem := fyne.NewMenuItem("Показать", func() { m.sendSimpleEvent(state.EventTrayShowWindow) })
 	hideItem := fyne.NewMenuItem("Скрыть", func() { m.sendSimpleEvent(state.EventTrayHideWindow) })
-	menu := fyne.NewMenu(m.appName, showItem, hideItem)
+	quitItem := fyne.NewMenuItem(lang.L("Quit"), func() { m.sendSimpleEvent(state.EventTrayExit) })
+	quitItem.IsQuit = true
+	menu := fyne.NewMenu(m.appName, showItem, hideItem, fyne.NewMenuItemSeparator(), quitItem)
 	tray := m.trayApp()
 	if tray == nil {
 		return

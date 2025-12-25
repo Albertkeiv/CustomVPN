@@ -32,6 +32,7 @@ Thumbs.db
 
 # Built binaries
 example-server/example-server.exe
+example-server/example-server
 
 # Logs
 *.log

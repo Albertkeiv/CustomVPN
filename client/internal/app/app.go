@@ -31,6 +31,7 @@ type Application struct {
 	launcher   *process.Launcher
 	controlIP4 net.IP
 	ui         *ui.Manager
+	cleanupOnce sync.Once
 	shutdown   chan struct{}
 	runCtx     context.Context
 	runCancel  context.CancelFunc
@@ -71,6 +72,7 @@ func New(cfg *config.Config, logger *logging.Logger) (*Application, error) {
 		Logger:   logger,
 		Dispatch: app.dispatch,
 	})
+	uiManager.SetOnStopped(app.onAppStopped)
 	app.ui = uiManager
 	callbacks := state.Callbacks{
 		StartPreflight:      app.startPreflight,
@@ -155,6 +157,10 @@ func (a *Application) Done() <-chan struct{} {
 
 func (a *Application) cleanupAndExit(_ *state.AppContext) {
 	a.logger.Infof("state machine requested shutdown")
+	a.cleanupOnce.Do(func() { a.runExitCleanup() })
+	if a.ui != nil {
+		a.ui.Quit()
+	}
 	a.Stop()
 }
 
@@ -180,6 +186,27 @@ func (a *Application) onProcessExit(name state.ProcessName, exitCode int, reason
 	if err := a.dispatch(state.Event{Type: state.EventSysProcessExited, Payload: payload}); err != nil {
 		// ошибка уже залогирована в dispatch
 	}
+}
+
+func (a *Application) onAppStopped() {
+	a.cleanupOnce.Do(func() { a.runExitCleanup() })
+}
+
+func (a *Application) runExitCleanup() {
+	if a.ctx == nil {
+		return
+	}
+	if err := a.executeDisconnecting(a.ctx); err != nil {
+		a.logger.Errorf("exit cleanup failed: %v", err)
+	}
+	if a.firewall != nil {
+		firewallCtx, cancel := a.requestContext(routeOpTimeout)
+		if err := a.firewall.RemoveKillSwitchGroup(firewallCtx); err != nil {
+			a.logger.Errorf("exit cleanup firewall group failed: %v", err)
+		}
+		cancel()
+	}
+	_ = a.deleteCleanupState()
 }
 
 func intPtr(v int) *int {

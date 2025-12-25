@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"customvpn/client/internal/controlclient"
+	"customvpn/client/internal/firewall"
 	"customvpn/client/internal/routes"
 	"customvpn/client/internal/state"
 )
@@ -677,6 +678,42 @@ func (a *Application) applyKillSwitch(ctx *state.AppContext, profile *state.Prof
 		return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch не может определить основной интерфейс", fmt.Errorf("default gateway interface name is empty"))
 	}
 	firewallCtx, cancel := a.requestContext(routeOpTimeout)
+	if err := a.firewall.CheckAvailable(firewallCtx, ctx.DefaultGateway.InterfaceName); err != nil {
+		cancel()
+		if errors.Is(err, firewall.ErrFirewallDisabled) {
+			if a.logger != nil {
+				a.logger.Debugf("kill switch skipped: windows firewall is disabled")
+			}
+			return nil
+		}
+		if errors.Is(err, firewall.ErrLocalPolicyMergeDisabled) {
+			if a.ui != nil && a.ui.ConfirmEnableLocalPolicyMerge() {
+				if a.logger != nil {
+					a.logger.Infof("attempting to enable local firewall rules")
+				}
+				enableCtx, enableCancel := a.requestContext(routeOpTimeout)
+				enableErr := a.firewall.EnableLocalPolicyMerge(enableCtx)
+				enableCancel()
+				if enableErr != nil {
+					if errors.Is(enableErr, firewall.ErrLocalPolicyMergeUnsupported) {
+						return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен: AllowLocalPolicyMerge не поддерживается в системе", enableErr)
+					}
+					return newScenarioError(state.ErrorKindRoutingFailed, "Не удалось включить локальные правила брандмауэра", enableErr)
+				}
+				recheckCtx, recheckCancel := a.requestContext(routeOpTimeout)
+				recheckErr := a.firewall.CheckAvailable(recheckCtx, ctx.DefaultGateway.InterfaceName)
+				recheckCancel()
+				if recheckErr != nil {
+					return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен", recheckErr)
+				}
+				firewallCtx, cancel = a.requestContext(routeOpTimeout)
+			} else {
+				return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен: локальные правила брандмауэра запрещены", err)
+			}
+		} else {
+			return newScenarioError(state.ErrorKindRoutingFailed, "Kill Switch недоступен", err)
+		}
+	}
 	defer cancel()
 	rules, err := a.firewall.BlockDNSOnInterface(firewallCtx, ctx.DefaultGateway.InterfaceName, nil, a.cfg.CorePath)
 	if err != nil {

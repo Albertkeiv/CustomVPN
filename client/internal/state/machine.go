@@ -486,11 +486,7 @@ func (m *Machine) handlePreparingEnv(evt Event) {
 func (m *Machine) handleReady(evt Event) {
 	switch evt.Type {
 	case EventUISelectProfile:
-		if payload, ok := evt.Payload.(SelectionPayload); ok {
-			m.ctx.SelectedProfileID = payload.ID
-			m.ctx.UI.SelectedProfileID = payload.ID
-			m.refreshUI()
-		}
+		m.applyProfileSelection(evt)
 	case EventUIClickConnect, EventTrayConnect:
 		if m.ctx.SelectedProfileID == "" {
 			m.showTransient("Выберите профиль")
@@ -537,6 +533,8 @@ func (m *Machine) handleConnecting(evt Event) {
 
 func (m *Machine) handleConnected(evt Event) {
 	switch evt.Type {
+	case EventUISelectProfile:
+		m.applyProfileSelection(evt)
 	case EventUIClickDisconnect, EventTrayDisconnect:
 		m.pendingPF = false
 		m.ctx.UI.StatusText = "Отключение..."
@@ -564,6 +562,8 @@ func (m *Machine) handleConnected(evt Event) {
 
 func (m *Machine) handleDisconnecting(evt Event) {
 	switch evt.Type {
+	case EventUISelectProfile:
+		m.applyProfileSelection(evt)
 	case EventSysDisconnectingDone:
 		m.ctx.UI.StatusText = "Отключено"
 		m.transition(StateReadyDisconnected)
@@ -579,6 +579,10 @@ func (m *Machine) handleDisconnecting(evt Event) {
 func (m *Machine) handleErrorState(evt Event) {
 	if evt.Type == EventUICredentialsChanged {
 		m.applyCredentials(evt)
+		return
+	}
+	if evt.Type == EventUISelectProfile {
+		m.applyProfileSelection(evt)
 		return
 	}
 	if evt.Type == EventUIClickLogin && m.ctx.LastError != nil {
@@ -607,6 +611,14 @@ func (m *Machine) applyCredentials(evt Event) {
 	if payload, ok := evt.Payload.(CredentialsPayload); ok {
 		m.ctx.UI.LoginInput = payload.Login
 		m.ctx.UI.PasswordInput = payload.Password
+	}
+}
+
+func (m *Machine) applyProfileSelection(evt Event) {
+	if payload, ok := evt.Payload.(SelectionPayload); ok {
+		m.ctx.SelectedProfileID = payload.ID
+		m.ctx.UI.SelectedProfileID = payload.ID
+		m.refreshUI()
 	}
 }
 
@@ -720,11 +732,12 @@ func (m *Machine) runAsync(fn func()) {
 }
 
 func (m *Machine) invokeCleanup() {
-	if !m.stopped.Load() {
-		m.Stop()
-	}
 	if m.callbacks.CleanupAndExit != nil {
 		m.callbacks.CleanupAndExit(m.ctx)
+		return
+	}
+	if !m.stopped.Load() {
+		m.Stop()
 	}
 }
 

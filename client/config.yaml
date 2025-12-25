@@ -1,6 +1,6 @@
 # Базовая конфигурация клиента CustomVPN (MVP)
 # Значения можно переопределять в зависимости от окружения.
-control_server_url: "http://127.0.0.1:8080"
+control_server_url: "https://gaba33.ftp.sh:48080"
 core_path: "./bin/sing-box.exe"
 log_level: "debug"
 log_file: "./logs/app.log"
